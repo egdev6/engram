@@ -8,8 +8,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/mcp"
+	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -952,5 +954,373 @@ func TestCmdSyncUsesDetectProject(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "git-detected-project") {
 		t.Fatalf("expected detectProject result in output, got: %q", stdout)
+	}
+}
+
+// ─── obsidian-export command tests ───────────────────────────────────────────
+
+// TestObsidianExportMissingVault verifies that omitting --vault exits with code 1
+// and prints an error message to stderr (REQ-EXPORT-01: missing --vault scenario).
+func TestObsidianExportMissingVault(t *testing.T) {
+	cfg := testConfig(t)
+
+	var exitCode int
+	oldExit := exitFunc
+	t.Cleanup(func() { exitFunc = oldExit })
+	exitFunc = func(code int) { exitCode = code; panic("exit") }
+
+	withArgs(t, "engram", "obsidian-export", "--project", "eng")
+
+	// Capture stderr before the panic unwinds by closing pipes inside captureOutput.
+	// We use a wrapper that recovers from the exitFunc panic and then still closes
+	// the write-end pipes so ReadAll can drain them.
+	oldOut := os.Stdout
+	oldErr := os.Stderr
+	outR, outW, _ := os.Pipe()
+	errR, errW, _ := os.Pipe()
+	os.Stdout = outW
+	os.Stderr = errW
+
+	func() {
+		defer func() {
+			recover() //nolint:errcheck
+		}()
+		cmdObsidianExport(cfg)
+	}()
+
+	_ = outW.Close()
+	_ = errW.Close()
+	os.Stdout = oldOut
+	os.Stderr = oldErr
+
+	errBytes, _ := io.ReadAll(errR)
+	_, _ = io.ReadAll(outR)
+	stderr := string(errBytes)
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+	if !strings.Contains(stderr, "--vault") {
+		t.Fatalf("expected '--vault' in stderr, got: %q", stderr)
+	}
+}
+
+// TestObsidianExportCallsInjectedExporter verifies that when --vault is provided,
+// the injected newObsidianExporter is called with the correct config
+// (REQ-EXPORT-01: happy path with all flags).
+func TestObsidianExportCallsInjectedExporter(t *testing.T) {
+	cfg := testConfig(t)
+	vaultDir := t.TempDir()
+
+	// Track the ExportConfig passed to the injected constructor
+	var capturedCfg obsidian.ExportConfig
+	exporterCalled := false
+
+	oldNew := newObsidianExporter
+	t.Cleanup(func() { newObsidianExporter = oldNew })
+	newObsidianExporter = func(s obsidian.StoreReader, c obsidian.ExportConfig) *obsidian.Exporter {
+		capturedCfg = c
+		exporterCalled = true
+		return obsidian.NewExporter(s, c)
+	}
+
+	withArgs(t, "engram", "obsidian-export",
+		"--vault", vaultDir,
+		"--project", "eng",
+		"--limit", "50",
+		"--since", "2026-01-01",
+	)
+
+	_, _ = captureOutput(t, func() { cmdObsidianExport(cfg) })
+
+	if !exporterCalled {
+		t.Fatalf("expected newObsidianExporter to be called")
+	}
+	if capturedCfg.VaultPath != vaultDir {
+		t.Fatalf("expected VaultPath=%q, got %q", vaultDir, capturedCfg.VaultPath)
+	}
+	if capturedCfg.Project != "eng" {
+		t.Fatalf("expected Project=%q, got %q", "eng", capturedCfg.Project)
+	}
+	if capturedCfg.Limit != 50 {
+		t.Fatalf("expected Limit=50, got %d", capturedCfg.Limit)
+	}
+	if capturedCfg.Since.IsZero() {
+		t.Fatalf("expected Since to be set from --since 2026-01-01, got zero")
+	}
+}
+
+// TestObsidianExportMinimalFlags verifies that only --vault (the required flag)
+// is sufficient — optional flags default to zero values (triangulation case).
+func TestObsidianExportMinimalFlags(t *testing.T) {
+	cfg := testConfig(t)
+	vaultDir := t.TempDir()
+
+	var capturedCfg obsidian.ExportConfig
+	oldNew := newObsidianExporter
+	t.Cleanup(func() { newObsidianExporter = oldNew })
+	newObsidianExporter = func(s obsidian.StoreReader, c obsidian.ExportConfig) *obsidian.Exporter {
+		capturedCfg = c
+		return obsidian.NewExporter(s, c)
+	}
+
+	withArgs(t, "engram", "obsidian-export", "--vault", vaultDir)
+
+	_, _ = captureOutput(t, func() { cmdObsidianExport(cfg) })
+
+	if capturedCfg.VaultPath != vaultDir {
+		t.Fatalf("expected VaultPath=%q, got %q", vaultDir, capturedCfg.VaultPath)
+	}
+	// Optional flags should be zero
+	if capturedCfg.Project != "" {
+		t.Fatalf("expected empty Project, got %q", capturedCfg.Project)
+	}
+	if capturedCfg.Limit != 0 {
+		t.Fatalf("expected Limit=0, got %d", capturedCfg.Limit)
+	}
+	if !capturedCfg.Since.IsZero() {
+		t.Fatalf("expected Since=zero, got %v", capturedCfg.Since)
+	}
+}
+
+// TestObsidianExportInHelpText verifies that "obsidian-export" appears in printUsage output.
+func TestObsidianExportInHelpText(t *testing.T) {
+	stdout, _ := captureOutput(t, func() { printUsage() })
+	if !strings.Contains(stdout, "obsidian-export") {
+		t.Fatalf("expected 'obsidian-export' in help text, got: %q", stdout)
+	}
+}
+
+// ─── obsidian-export Phase 4 tests (graph-config, watch, interval) ───────────
+
+// captureExitPanic is a helper that runs fn inside a panic-recovering wrapper,
+// captures stdout/stderr via os.Pipe, and returns the exit code (via exitFunc stub).
+func captureExitPanic(t *testing.T, fn func()) (stdout, stderr string, exitCode int) {
+	t.Helper()
+
+	oldExit := exitFunc
+	t.Cleanup(func() { exitFunc = oldExit })
+	exitFunc = func(code int) { exitCode = code; panic("exit") }
+
+	oldOut := os.Stdout
+	oldErr := os.Stderr
+	outR, outW, _ := os.Pipe()
+	errR, errW, _ := os.Pipe()
+	os.Stdout = outW
+	os.Stderr = errW
+
+	func() {
+		defer func() { recover() }() //nolint:errcheck
+		fn()
+	}()
+
+	_ = outW.Close()
+	_ = errW.Close()
+	os.Stdout = oldOut
+	os.Stderr = oldErr
+
+	outBytes, _ := io.ReadAll(outR)
+	errBytes, _ := io.ReadAll(errR)
+	return string(outBytes), string(errBytes), exitCode
+}
+
+// TestObsidianExportGraphConfigInvalid verifies that --graph-config with an
+// invalid value exits 1 and prints an error to stderr. (REQ-GRAPH-01)
+func TestObsidianExportGraphConfigInvalid(t *testing.T) {
+	cfg := testConfig(t)
+	vaultDir := t.TempDir()
+
+	withArgs(t, "engram", "obsidian-export",
+		"--vault", vaultDir,
+		"--graph-config", "bananas",
+	)
+
+	_, stderr, code := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr, "graph-config") {
+		t.Fatalf("expected 'graph-config' in stderr, got: %q", stderr)
+	}
+}
+
+// TestObsidianExportGraphConfigDefaultsToPreserve verifies that when --graph-config
+// is not set, the exporter is called with GraphConfigPreserve. (REQ-GRAPH-01)
+func TestObsidianExportGraphConfigDefaultsToPreserve(t *testing.T) {
+	cfg := testConfig(t)
+	vaultDir := t.TempDir()
+
+	var capturedCfg obsidian.ExportConfig
+	oldNew := newObsidianExporter
+	t.Cleanup(func() { newObsidianExporter = oldNew })
+	newObsidianExporter = func(s obsidian.StoreReader, c obsidian.ExportConfig) *obsidian.Exporter {
+		capturedCfg = c
+		return obsidian.NewExporter(s, c)
+	}
+
+	withArgs(t, "engram", "obsidian-export", "--vault", vaultDir)
+
+	_, _ = captureOutput(t, func() { cmdObsidianExport(cfg) })
+
+	if capturedCfg.GraphConfig != obsidian.GraphConfigPreserve {
+		t.Fatalf("expected GraphConfig=%q (preserve), got %q", obsidian.GraphConfigPreserve, capturedCfg.GraphConfig)
+	}
+}
+
+// TestObsidianExportWatchRequiresInterval verifies that --watch alone uses
+// the default 10m interval and does NOT exit with an error. (REQ-WATCH-02)
+func TestObsidianExportWatchRequiresInterval(t *testing.T) {
+	cfg := testConfig(t)
+	vaultDir := t.TempDir()
+
+	// Inject a fake watcher that records the call and returns immediately.
+	var watcherCalled bool
+	var capturedInterval time.Duration
+	oldWatcher := newObsidianWatcher
+	t.Cleanup(func() { newObsidianWatcher = oldWatcher })
+	newObsidianWatcher = func(wc obsidian.WatcherConfig) *obsidian.Watcher {
+		watcherCalled = true
+		capturedInterval = wc.Interval
+		return nil // nil signals the CLI to skip watcher.Run()
+	}
+
+	withArgs(t, "engram", "obsidian-export", "--vault", vaultDir, "--watch")
+
+	// --watch with nil watcher should not panic and should not exit 1
+	var exitCode int
+	oldExit := exitFunc
+	t.Cleanup(func() { exitFunc = oldExit })
+	exitFunc = func(code int) { exitCode = code; panic("exit") }
+
+	func() {
+		defer func() { recover() }() //nolint:errcheck
+		_, _ = captureOutput(t, func() { cmdObsidianExport(cfg) })
+	}()
+
+	// Exit code should be 0 (clean exit after watcher returns nil)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	if !watcherCalled {
+		t.Fatalf("expected newObsidianWatcher to be called")
+	}
+	if capturedInterval != 10*time.Minute {
+		t.Fatalf("expected default interval 10m, got %v", capturedInterval)
+	}
+}
+
+// TestObsidianExportIntervalWithoutWatchErrors verifies that --interval without
+// --watch exits 1. (REQ-WATCH-07)
+func TestObsidianExportIntervalWithoutWatchErrors(t *testing.T) {
+	cfg := testConfig(t)
+	vaultDir := t.TempDir()
+
+	withArgs(t, "engram", "obsidian-export",
+		"--vault", vaultDir,
+		"--interval", "5m",
+	)
+
+	_, stderr, code := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr, "--interval") && !strings.Contains(stderr, "watch") {
+		t.Fatalf("expected '--interval' or 'watch' in stderr, got: %q", stderr)
+	}
+}
+
+// TestObsidianExportIntervalBelowMinimumErrors verifies that --watch --interval 30s
+// exits 1 because the interval is below the 1-minute minimum. (REQ-WATCH-07)
+func TestObsidianExportIntervalBelowMinimumErrors(t *testing.T) {
+	cfg := testConfig(t)
+	vaultDir := t.TempDir()
+
+	withArgs(t, "engram", "obsidian-export",
+		"--vault", vaultDir,
+		"--watch",
+		"--interval", "30s",
+	)
+
+	_, stderr, code := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr, "1m") && !strings.Contains(stderr, "minimum") {
+		t.Fatalf("expected minimum interval message in stderr, got: %q", stderr)
+	}
+}
+
+// TestObsidianExportIntervalUnparseableErrors verifies that --watch --interval banana
+// exits 1 with a parse error. (REQ-WATCH-07)
+func TestObsidianExportIntervalUnparseableErrors(t *testing.T) {
+	cfg := testConfig(t)
+	vaultDir := t.TempDir()
+
+	withArgs(t, "engram", "obsidian-export",
+		"--vault", vaultDir,
+		"--watch",
+		"--interval", "banana",
+	)
+
+	_, stderr, code := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr, "interval") {
+		t.Fatalf("expected 'interval' in stderr, got: %q", stderr)
+	}
+}
+
+// TestObsidianExportWatchModeCallsInjectedWatcher verifies that with --watch,
+// the injected newObsidianWatcher is called with the correct WatcherConfig.
+// Uses a fake that records the call. (REQ-WATCH-01)
+func TestObsidianExportWatchModeCallsInjectedWatcher(t *testing.T) {
+	cfg := testConfig(t)
+	vaultDir := t.TempDir()
+
+	var watcherCfg obsidian.WatcherConfig
+	watcherCalled := false
+	oldWatcher := newObsidianWatcher
+	t.Cleanup(func() { newObsidianWatcher = oldWatcher })
+	newObsidianWatcher = func(wc obsidian.WatcherConfig) *obsidian.Watcher {
+		watcherCalled = true
+		watcherCfg = wc
+		return nil // nil means Run() is skipped; clean exit
+	}
+
+	withArgs(t, "engram", "obsidian-export",
+		"--vault", vaultDir,
+		"--watch",
+		"--interval", "2m",
+	)
+
+	var exitCode int
+	oldExit := exitFunc
+	t.Cleanup(func() { exitFunc = oldExit })
+	exitFunc = func(code int) { exitCode = code; panic("exit") }
+
+	func() {
+		defer func() { recover() }() //nolint:errcheck
+		_, _ = captureOutput(t, func() { cmdObsidianExport(cfg) })
+	}()
+
+	if exitCode != 0 {
+		t.Fatalf("expected clean exit (0), got %d", exitCode)
+	}
+	if !watcherCalled {
+		t.Fatalf("expected newObsidianWatcher to be called")
+	}
+	if watcherCfg.Interval != 2*time.Minute {
+		t.Fatalf("expected interval 2m, got %v", watcherCfg.Interval)
+	}
+	if watcherCfg.Exporter == nil {
+		t.Fatalf("expected non-nil Exporter in WatcherConfig")
+	}
+	if watcherCfg.Logf == nil {
+		t.Fatalf("expected non-nil Logf in WatcherConfig")
 	}
 }

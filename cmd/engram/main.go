@@ -12,6 +12,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -23,8 +24,10 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/mcp"
+	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/server"
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -99,6 +102,12 @@ var (
 
 	stdinScanner = func() *bufio.Scanner { return bufio.NewScanner(os.Stdin) }
 	userHomeDir  = os.UserHomeDir
+
+	// newObsidianExporter is injectable for testing.
+	newObsidianExporter = obsidian.NewExporter
+
+	// newObsidianWatcher is injectable for testing.
+	newObsidianWatcher = obsidian.NewWatcher
 )
 
 func main() {
@@ -158,6 +167,8 @@ func main() {
 		cmdImport(cfg)
 	case "sync":
 		cmdSync(cfg)
+	case "obsidian-export":
+		cmdObsidianExport(cfg)
 	case "projects":
 		cmdProjects(cfg)
 	case "setup":
@@ -724,6 +735,187 @@ func cmdSync(cfg store.Config) {
 	fmt.Println()
 	fmt.Println("Add to git:")
 	fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
+}
+
+// storeAdapter wraps *store.Store to satisfy obsidian.StoreReader.
+// The real store.Stats() returns (*store.Stats, error); the interface expects *store.Stats.
+type storeAdapter struct{ s *store.Store }
+
+func (a *storeAdapter) Export() (*store.ExportData, error) { return a.s.Export() }
+func (a *storeAdapter) Stats() *store.Stats {
+	st, _ := a.s.Stats()
+	return st
+}
+
+func cmdObsidianExport(cfg store.Config) {
+	// Parse flags
+	var (
+		vault       string
+		project     string
+		limit       int
+		since       string
+		force       bool
+		graphConfig string
+		watch       bool
+		interval    string
+	)
+
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--vault":
+			if i+1 < len(os.Args) {
+				vault = os.Args[i+1]
+				i++
+			}
+		case "--project":
+			if i+1 < len(os.Args) {
+				project = os.Args[i+1]
+				i++
+			}
+		case "--limit":
+			if i+1 < len(os.Args) {
+				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
+					limit = n
+				}
+				i++
+			}
+		case "--since":
+			if i+1 < len(os.Args) {
+				since = os.Args[i+1]
+				i++
+			}
+		case "--force":
+			force = true
+		case "--graph-config":
+			if i+1 < len(os.Args) {
+				graphConfig = os.Args[i+1]
+				i++
+			}
+		case "--watch":
+			watch = true
+		case "--interval":
+			if i+1 < len(os.Args) {
+				interval = os.Args[i+1]
+				i++
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "engram: unknown flag: %s\n", os.Args[i])
+			exitFunc(1)
+		}
+	}
+
+	if vault == "" {
+		fmt.Fprintln(os.Stderr, "error: flag --vault is required")
+		exitFunc(1)
+	}
+
+	// Default --graph-config to "preserve"
+	if graphConfig == "" {
+		graphConfig = string(obsidian.GraphConfigPreserve)
+	}
+
+	graphMode, err := obsidian.ParseGraphConfigMode(graphConfig)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid --graph-config value: %s (accepted: preserve, force, skip)\n", graphConfig)
+		exitFunc(1)
+	}
+
+	// Validate --interval requires --watch
+	if interval != "" && !watch {
+		fmt.Fprintln(os.Stderr, "error: --interval requires --watch")
+		exitFunc(1)
+	}
+
+	// Parse and validate --interval (default 10m when --watch is set)
+	var watchInterval time.Duration
+	if watch {
+		intervalStr := interval
+		if intervalStr == "" {
+			intervalStr = "10m"
+		}
+		d, parseErr := time.ParseDuration(intervalStr)
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid --interval value %q: %v\n", intervalStr, parseErr)
+			exitFunc(1)
+		}
+		if d < time.Minute {
+			fmt.Fprintf(os.Stderr, "error: --interval must be at least 1m (minimum), got %v\n", d)
+			exitFunc(1)
+		}
+		watchInterval = d
+	}
+
+	exportCfg := obsidian.ExportConfig{
+		VaultPath:   vault,
+		Project:     project,
+		Limit:       limit,
+		Force:       force,
+		GraphConfig: graphMode,
+	}
+
+	if since != "" {
+		// Try common date formats: full RFC3339, date-only (YYYY-MM-DD)
+		var sinceTime time.Time
+		var parseErr error
+		for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+			sinceTime, parseErr = time.Parse(layout, since)
+			if parseErr == nil {
+				break
+			}
+		}
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid --since value %q (expected YYYY-MM-DD or RFC3339)\n", since)
+			exitFunc(1)
+		}
+		exportCfg.Since = sinceTime
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer s.Close()
+
+	exp := newObsidianExporter(&storeAdapter{s: s}, exportCfg)
+
+	if watch {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
+		w := newObsidianWatcher(obsidian.WatcherConfig{
+			Exporter: exp,
+			Interval: watchInterval,
+			Logf:     log.Printf,
+		})
+
+		if w != nil {
+			if runErr := w.Run(ctx); runErr != nil {
+				log.Printf("[engram] shutting down watch mode: %v", runErr)
+			} else {
+				log.Printf("[engram] shutting down watch mode")
+			}
+		}
+		exitFunc(0)
+		return
+	}
+
+	result, err := exp.Export()
+	if err != nil {
+		fatal(err)
+	}
+
+	fmt.Printf("Obsidian export complete\n")
+	fmt.Printf("  Created: %d\n", result.Created)
+	fmt.Printf("  Updated: %d\n", result.Updated)
+	fmt.Printf("  Deleted: %d\n", result.Deleted)
+	fmt.Printf("  Skipped: %d\n", result.Skipped)
+	fmt.Printf("  Hubs:    %d\n", result.HubsCreated)
+	if len(result.Errors) > 0 {
+		fmt.Fprintf(os.Stderr, "  Errors: %d\n", len(result.Errors))
+		for _, e := range result.Errors {
+			fmt.Fprintf(os.Stderr, "    - %v\n", e)
+		}
+	}
 }
 
 func cmdProjects(cfg store.Config) {
@@ -1362,6 +1554,15 @@ Commands:
                        --status   Show sync status (local vs remote chunks)
                        --project  Filter export to a specific project
                        --all      Export ALL projects (ignore directory-based filter)
+  obsidian-export    Export memories to an Obsidian-compatible markdown vault
+                       --vault         Path to Obsidian vault root (required)
+                       --project       Filter export to a single project (optional)
+                       --limit         Cap exported observations at N (optional)
+                       --since         Export only observations after this date, e.g. 2026-01-01 (optional)
+                       --force         Ignore incremental state, full re-export (optional)
+                       --graph-config  Graph layout mode: preserve|force|skip (default: preserve)
+                       --watch         Enable auto-sync mode (runs on interval until Ctrl+C)
+                       --interval      Sync interval for --watch mode (default: 10m, minimum: 1m)
 
   version            Print version
   help               Show this help
