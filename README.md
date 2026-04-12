@@ -137,6 +137,7 @@ Full sync documentation → [DOCS.md](DOCS.md)
 | `engram projects list` | Show all projects with observation/session/prompt counts |
 | `engram projects consolidate` | Interactive merge of similar project names (`--all`, `--dry-run`) |
 | `engram projects prune` | Remove projects with 0 observations (`--dry-run`) |
+| `engram obsidian-export` | Export memories to Obsidian vault (beta) |
 | `engram version` | Show version |
 
 ## Documentation
@@ -148,6 +149,8 @@ Full sync documentation → [DOCS.md](DOCS.md)
 | [Architecture](docs/ARCHITECTURE.md) | How it works + MCP tools + project structure |
 | [Plugins](docs/PLUGINS.md) | OpenCode & Claude Code plugin details |
 | [Comparison](docs/COMPARISON.md) | Why Engram vs claude-mem |
+| [Intended Usage](docs/intended-usage.md) | Mental model — how Engram is meant to be used |
+| [Obsidian Brain](docs/beta/obsidian-brain.md) | Export memories as Obsidian knowledge graph (beta) |
 | [Contributing](CONTRIBUTING.md) | Contribution workflow + standards |
 | [Full Docs](DOCS.md) | Complete technical reference |
 

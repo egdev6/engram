@@ -40,3 +40,11 @@
 ---
 
 **Inspired by [claude-mem](https://github.com/thedotmack/claude-mem)** — but agent-agnostic, simpler, and built different.
+
+---
+
+## Next Steps
+
+- [Installation](INSTALLATION.md) — get Engram running
+- [Agent Setup](AGENT-SETUP.md) — connect your agent
+- [Architecture](ARCHITECTURE.md) — how it works under the hood

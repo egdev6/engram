@@ -172,5 +172,14 @@ engram sync --all         Export ALL projects (ignore directory-based filter)
 engram projects list      Show all projects with obs/session/prompt counts
 engram projects consolidate  Interactive merge of similar project names [--all] [--dry-run]
 engram projects prune     Remove projects with 0 observations [--dry-run]
+engram obsidian-export    Export memories to Obsidian vault (beta)
 engram version            Show version
 ```
+
+---
+
+## Next Steps
+
+- [Agent Setup](AGENT-SETUP.md) — connect your agent to Engram
+- [Plugins](PLUGINS.md) — what the OpenCode and Claude Code plugins add
+- [Obsidian Brain](beta/obsidian-brain.md) — visualize memories as a knowledge graph (beta)

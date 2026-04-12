@@ -10,8 +10,7 @@ An agent-agnostic persistent memory system. A Go binary with SQLite + FTS5 full-
 
 **Why Go?** Single binary, cross-platform, no runtime dependencies. Uses `modernc.org/sqlite` (pure Go, no CGO).
 
-- **Module**: `github.com/alanbuscaglia/engram`
-- **Version**: 0.1.0
+- **Module**: `github.com/Gentleman-Programming/engram`
 
 ---
 
@@ -27,7 +26,7 @@ Engram Go Binary
 SQLite + FTS5 (~/.engram/engram.db)
 ```
 
-Six interfaces:
+Four interfaces:
 
 1. **CLI** — Direct terminal usage (`engram search`, `engram save`, etc.)
 2. **HTTP API** — REST API on port 7437 for plugins and integrations
@@ -45,6 +44,7 @@ engram/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data operations
 │   ├── server/server.go            # HTTP REST API server (port 7437)
 │   ├── mcp/mcp.go                  # MCP stdio server (15 tools)
+│   ├── setup/setup.go              # Agent plugin installer (go:embed)
 │   ├── project/                     # Project name detection + similarity matching
 │   │   └── project.go              # DetectProject, FindSimilar, Levenshtein
 │   ├── sync/sync.go                # Git sync: manifest + chunks (gzipped JSONL)
@@ -53,9 +53,15 @@ engram/
 │       ├── styles.go               # Lipgloss styles (Catppuccin Mocha palette)
 │       ├── update.go               # Update(), handleKeyPress(), per-screen handlers
 │       └── view.go                 # View(), per-screen renderers
-├── skills/
-│   └── gentleman-bubbletea/
-│       └── SKILL.md                # Bubbletea TUI patterns reference
+├── plugin/
+│   ├── opencode/engram.ts          # OpenCode adapter plugin
+│   └── claude-code/                # Claude Code plugin (hooks + skill)
+│       ├── .claude-plugin/plugin.json
+│       ├── .mcp.json
+│       ├── hooks/hooks.json
+│       ├── scripts/                # session-start, post-compaction, subagent-stop, session-stop
+│       └── skills/memory/SKILL.md
+├── skills/                         # Contributor AI skills (repo-wide standards)
 ├── DOCS.md
 ├── go.mod
 ├── go.sum
@@ -101,6 +107,7 @@ engram sync               Export new memories as chunk [--import] [--status] [--
 engram projects list      Show all projects with obs/session/prompt counts
 engram projects consolidate  Interactive merge of similar project names [--all] [--dry-run]
 engram projects prune     Remove projects with 0 observations [--dry-run]
+engram obsidian-export    Export memories to Obsidian vault [--vault PATH] [--project NAME] [--limit N] [--since DATE] [--force] [--graph-config PATH] [--watch] [--interval N]
 engram version            Print version
 engram help               Show help
 ```
@@ -208,7 +215,7 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 
 ### Health
 
-- `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "0.1.0"}`
+- `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "<current>"}`
 
 ### Sessions
 
@@ -251,8 +258,17 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 
 - `GET /stats` — Memory statistics
 
+### Passive Capture
+
+- `POST /observations/passive` — Extract structured learnings from text. Body: `{content, session_id?, project?}`
+
+### Project Migration
+
+- `POST /projects/migrate` — Migrate observations between project names. Body: `{source, target}`
+
 ### Sync Status
 
+- `GET /sync/status` — Chunk sync status (local vs remote counts, pending imports)
 
 ---
 
@@ -632,9 +648,11 @@ The `tool.execute.after` hook receives:
 - `github.com/charmbracelet/bubbletea v1.3.10` — Terminal UI framework
 - `github.com/charmbracelet/lipgloss v1.1.0` — Terminal styling
 - `github.com/charmbracelet/bubbles v1.0.0` — TUI components (textinput, etc.)
+- `github.com/a-h/templ v0.3.1001` — HTML templating (for dashboard)
 - `github.com/lib/pq` — Postgres driver (for cloud server)
 - `github.com/golang-jwt/jwt/v5` — JWT token generation and validation (for cloud auth)
 - `golang.org/x/crypto` — bcrypt password hashing (for cloud auth)
+- `github.com/ory/dockertest/v3` — Docker-based integration testing
 
 ### OpenCode Plugin
 
@@ -648,7 +666,7 @@ The `tool.execute.after` hook receives:
 ### From source
 
 ```bash
-git clone https://github.com/alanbuscaglia/engram.git
+git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go build -o engram ./cmd/engram
 go install ./cmd/engram
