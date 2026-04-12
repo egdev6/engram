@@ -1274,7 +1274,10 @@ func (s *Store) DeleteSession(id string) error {
 			}
 			return fmt.Errorf("delete session: %w", err)
 		}
-		n, _ := res.RowsAffected()
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("delete session: rows affected: %w", err)
+		}
 		if n == 0 {
 			return fmt.Errorf("%w: %q", ErrSessionNotFound, id)
 		}
@@ -1298,7 +1301,10 @@ func (s *Store) DeletePrompt(id int64) error {
 		if err != nil {
 			return fmt.Errorf("delete prompt: %w", err)
 		}
-		n, _ := res.RowsAffected()
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("delete prompt: rows affected: %w", err)
+		}
 		if n == 0 {
 			return fmt.Errorf("%w: prompt #%d", ErrPromptNotFound, id)
 		}
