@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
@@ -146,6 +147,10 @@ func NewServerWithTools(s *store.Store, allowlist map[string]bool) *server.MCPSe
 // NewServerWithConfig creates an MCP server with full configuration including
 // default project detection and optional tool allowlist.
 func NewServerWithConfig(s *store.Store, cfg MCPConfig, allowlist map[string]bool) *server.MCPServer {
+	return newServerWithActivity(s, cfg, allowlist, NewSessionActivity(10*time.Minute))
+}
+
+func newServerWithActivity(s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) *server.MCPServer {
 	srv := server.NewMCPServer(
 		"engram",
 		"0.1.0",
@@ -153,7 +158,7 @@ func NewServerWithConfig(s *store.Store, cfg MCPConfig, allowlist map[string]boo
 		server.WithInstructions(serverInstructions),
 	)
 
-	registerTools(srv, s, cfg, allowlist)
+	registerTools(srv, s, cfg, allowlist, activity)
 	return srv
 }
 
@@ -166,7 +171,7 @@ func shouldRegister(name string, allowlist map[string]bool) bool {
 	return allowlist[name]
 }
 
-func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowlist map[string]bool) {
+func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) {
 	// ─── mem_search (profile: agent, core — always in context) ─────────
 	if shouldRegister("mem_search", allowlist) {
 		srv.AddTool(
@@ -194,7 +199,7 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 					mcp.Description("Max results (default: 10, max: 20)"),
 				),
 			),
-			handleSearch(s, cfg),
+			handleSearch(s, cfg, activity),
 		)
 	}
 
@@ -257,7 +262,7 @@ Examples:
 					mcp.Description("Optional topic identifier for upserts (e.g. architecture/auth-model). Reuses and updates the latest observation in same project+scope."),
 				),
 			),
-			handleSave(s, cfg),
+			handleSave(s, cfg, activity),
 		)
 	}
 
@@ -392,7 +397,7 @@ Examples:
 					mcp.Description("Number of observations to retrieve (default: 20)"),
 				),
 			),
-			handleContext(s, cfg),
+			handleContext(s, cfg, activity),
 		)
 	}
 
@@ -508,7 +513,7 @@ GUIDELINES:
 					mcp.Description("Project name"),
 				),
 			),
-			handleSessionSummary(s, cfg),
+			handleSessionSummary(s, cfg, activity),
 		)
 	}
 
@@ -535,7 +540,7 @@ GUIDELINES:
 					mcp.Description("Working directory"),
 				),
 			),
-			handleSessionStart(s, cfg),
+			handleSessionStart(s, cfg, activity),
 		)
 	}
 
@@ -557,8 +562,11 @@ GUIDELINES:
 				mcp.WithString("summary",
 					mcp.Description("Summary of what was accomplished"),
 				),
+				mcp.WithString("project",
+					mcp.Description("Project name (used to clear activity tracking)"),
+				),
 			),
-			handleSessionEnd(s),
+			handleSessionEnd(s, cfg, activity),
 		)
 	}
 
@@ -591,7 +599,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
 				),
 			),
-			handleCapturePassive(s, cfg),
+			handleCapturePassive(s, cfg, activity),
 		)
 	}
 
@@ -622,7 +630,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────
 
-func handleSearch(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		query, _ := req.GetArguments()["query"].(string)
 		typ, _ := req.GetArguments()["type"].(string)
@@ -636,6 +644,9 @@ func handleSearch(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		}
 		// Normalize project name
 		project, _ = store.NormalizeProject(project)
+
+		sessionID := defaultSessionID(project)
+		activity.RecordToolCall(sessionID)
 
 		results, err := s.Search(query, store.SearchOptions{
 			Type:    typ,
@@ -673,11 +684,15 @@ func handleSearch(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			fmt.Fprintf(&b, "---\nResults above are previews (300 chars). To read the full content of a specific memory, call mem_get_observation(id: <ID>).\n")
 		}
 
+		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
+			b.WriteString(nudge)
+		}
+
 		return mcp.NewToolResultText(b.String()), nil
 	}
 }
 
-func handleSave(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		title, _ := req.GetArguments()["title"].(string)
 		content, _ := req.GetArguments()["content"].(string)
@@ -742,6 +757,8 @@ func handleSave(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
 		}
+
+		activity.RecordSave(defaultSessionID(project))
 
 		msg := fmt.Sprintf("Memory saved: %q (%s)", title, typ)
 		if topicKey == "" && suggestedTopicKey != "" {
@@ -880,7 +897,7 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	}
 }
 
-func handleContext(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		project, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
@@ -890,6 +907,9 @@ func handleContext(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			project = cfg.DefaultProject
 		}
 		project, _ = store.NormalizeProject(project)
+
+		sessionID := defaultSessionID(project)
+		activity.RecordToolCall(sessionID)
 
 		context, err := s.FormatContext(project, scope)
 		if err != nil {
@@ -910,6 +930,10 @@ func handleContext(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 
 		result := fmt.Sprintf("%s\n---\nMemory stats: %d sessions, %d observations across projects: %s",
 			context, stats.TotalSessions, stats.TotalObservations, projects)
+
+		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
+			result += nudge
+		}
 
 		return mcp.NewToolResultText(result), nil
 	}
@@ -1027,7 +1051,7 @@ func handleGetObservation(s *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleSessionSummary(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
@@ -1057,11 +1081,15 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 			return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil
 		}
 
-		return mcp.NewToolResultText(fmt.Sprintf("Session summary saved for project %q", project)), nil
+		msg := fmt.Sprintf("Session summary saved for project %q", project)
+		if score := activity.ActivityScore(defaultSessionID(project)); score != "" {
+			msg += "\n" + score
+		}
+		return mcp.NewToolResultText(msg), nil
 	}
 }
 
-func handleSessionStart(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id, _ := req.GetArguments()["id"].(string)
 		project, _ := req.GetArguments()["project"].(string)
@@ -1073,6 +1101,8 @@ func handleSessionStart(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		}
 		project, _ = store.NormalizeProject(project)
 
+		activity.RecordToolCall(defaultSessionID(project))
+
 		if err := s.CreateSession(id, project, directory); err != nil {
 			return mcp.NewToolResultError("Failed to start session: " + err.Error()), nil
 		}
@@ -1081,7 +1111,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	}
 }
 
-func handleSessionEnd(s *store.Store) server.ToolHandlerFunc {
+func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id, _ := req.GetArguments()["id"].(string)
 		summary, _ := req.GetArguments()["summary"].(string)
@@ -1090,11 +1120,19 @@ func handleSessionEnd(s *store.Store) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("Failed to end session: " + err.Error()), nil
 		}
 
+		// Determine the project for this session to clean up activity tracking
+		project := cfg.DefaultProject
+		if p, _ := req.GetArguments()["project"].(string); p != "" {
+			project = p
+		}
+		project, _ = store.NormalizeProject(project)
+		activity.ClearSession(defaultSessionID(project))
+
 		return mcp.NewToolResultText(fmt.Sprintf("Session %q completed", id)), nil
 	}
 }
 
-func handleCapturePassive(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
@@ -1106,6 +1144,8 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 			project = cfg.DefaultProject
 		}
 		project, _ = store.NormalizeProject(project)
+
+		activity.RecordToolCall(defaultSessionID(project))
 
 		if content == "" {
 			return mcp.NewToolResultError("content is required — include text with a '## Key Learnings:' section"), nil

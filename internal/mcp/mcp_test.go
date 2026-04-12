@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
@@ -84,7 +85,7 @@ func TestHandleSuggestTopicKeyRequiresInput(t *testing.T) {
 
 func TestHandleSaveSuggestsTopicKeyWhenMissing(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{})
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Auth architecture",
@@ -109,7 +110,7 @@ func TestHandleSaveSuggestsTopicKeyWhenMissing(t *testing.T) {
 
 func TestHandleSaveDoesNotSuggestWhenTopicKeyProvided(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{})
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":     "Auth architecture",
@@ -135,7 +136,7 @@ func TestHandleSaveDoesNotSuggestWhenTopicKeyProvided(t *testing.T) {
 
 func TestHandleCapturePassiveExtractsAndSaves(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{})
+	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "## Key Learnings:\n\n1. bcrypt cost=12 is the right balance for our server\n2. JWT refresh tokens need atomic rotation to prevent races\n",
@@ -161,7 +162,7 @@ func TestHandleCapturePassiveExtractsAndSaves(t *testing.T) {
 
 func TestHandleCapturePassiveRequiresContent(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{})
+	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project": "engram",
@@ -178,7 +179,7 @@ func TestHandleCapturePassiveRequiresContent(t *testing.T) {
 
 func TestHandleCapturePassiveWithNoLearningSection(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{})
+	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "plain text without learning headers",
@@ -201,7 +202,7 @@ func TestHandleCapturePassiveWithNoLearningSection(t *testing.T) {
 
 func TestHandleCapturePassiveDefaultsSourceAndSession(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{})
+	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "## Key Learnings:\n\n1. This learning is long enough to be persisted with default source",
@@ -230,7 +231,7 @@ func TestHandleCapturePassiveDefaultsSourceAndSession(t *testing.T) {
 
 func TestHandleCapturePassiveReturnsToolErrorOnStoreFailure(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{})
+	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Force FK failure: explicit session_id that does not exist.
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -303,7 +304,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		t.Fatalf("add observation: %v", err)
 	}
 
-	search := handleSearch(s, MCPConfig{})
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	searchReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "panic",
 		"project": "engram",
@@ -393,7 +394,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 		t.Fatalf("unexpected save prompt error: %s", callResultText(t, savePromptRes))
 	}
 
-	contextHandler := handleContext(s, MCPConfig{})
+	contextHandler := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	contextReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project": "engram",
 		"scope":   "project",
@@ -437,7 +438,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 		t.Fatalf("unexpected timeline error: %s", callResultText(t, timelineRes))
 	}
 
-	sessionSummary := handleSessionSummary(s, MCPConfig{})
+	sessionSummary := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	summaryReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project": "engram",
 		"content": "## Goal\nImprove tests",
@@ -450,7 +451,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 		t.Fatalf("unexpected session summary error: %s", callResultText(t, summaryRes))
 	}
 
-	sessionStart := handleSessionStart(s, MCPConfig{})
+	sessionStart := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	startReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":        "s-new",
 		"project":   "engram",
@@ -464,7 +465,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 		t.Fatalf("unexpected session start error: %s", callResultText(t, startRes))
 	}
 
-	sessionEnd := handleSessionEnd(s)
+	sessionEnd := handleSessionEnd(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	endReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":      "s-new",
 		"summary": "done",
@@ -481,7 +482,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 func TestMCPHandlersErrorBranches(t *testing.T) {
 	s := newMCPTestStore(t)
 
-	search := handleSearch(s, MCPConfig{})
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	noResultsReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "definitely-no-hit"}}}
 	noResultsRes, err := search(context.Background(), noResultsReq)
 	if err != nil {
@@ -570,7 +571,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("close store: %v", err)
 	}
 
-	searchRes, err := handleSearch(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "title"}}})
+	searchRes, err := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "title"}}})
 	if err != nil {
 		t.Fatalf("closed store search call: %v", err)
 	}
@@ -602,7 +603,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected save prompt to return tool error when store is closed")
 	}
 
-	contextRes, err := handleContext(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{})
+	contextRes, err := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil {
 		t.Fatalf("closed store context call: %v", err)
 	}
@@ -634,7 +635,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected get observation to return tool error when store is closed")
 	}
 
-	sessionSummaryRes, err := handleSessionSummary(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram", "content": "summary"}}})
+	sessionSummaryRes, err := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram", "content": "summary"}}})
 	if err != nil {
 		t.Fatalf("closed store session summary call: %v", err)
 	}
@@ -642,7 +643,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected session summary to return tool error when store is closed")
 	}
 
-	sessionStartRes, err := handleSessionStart(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "s1", "project": "engram"}}})
+	sessionStartRes, err := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "s1", "project": "engram"}}})
 	if err != nil {
 		t.Fatalf("closed store session start call: %v", err)
 	}
@@ -650,7 +651,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected session start to return tool error when store is closed")
 	}
 
-	sessionEndRes, err := handleSessionEnd(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "s1"}}})
+	sessionEndRes, err := handleSessionEnd(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "s1"}}})
 	if err != nil {
 		t.Fatalf("closed store session end call: %v", err)
 	}
@@ -662,7 +663,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 func TestMCPAdditionalCoverageBranches(t *testing.T) {
 	s := newMCPTestStore(t)
 
-	contextRes, err := handleContext(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{})
+	contextRes, err := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil {
 		t.Fatalf("context empty store: %v", err)
 	}
@@ -709,7 +710,7 @@ func TestMCPAdditionalCoverageBranches(t *testing.T) {
 		t.Fatalf("expected timeline session/after sections, got %q", text)
 	}
 
-	save := handleSave(s, MCPConfig{})
+	save := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	saveReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Default values",
 		"content": "Ensure defaults for type and session are used",
@@ -798,7 +799,7 @@ func TestHandleContextWithSessionOnlyUsesNoneProjects(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	res, err := handleContext(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+	res, err := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project": "engram",
 	}}})
 	if err != nil {
@@ -1350,7 +1351,7 @@ func TestDefaultSessionIDScopedByProject(t *testing.T) {
 
 func TestHandleSaveCreatesProjectScopedSession(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{})
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Save from project A without session_id
 	reqA := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -1427,7 +1428,7 @@ func TestHandleSavePromptCreatesProjectScopedSession(t *testing.T) {
 
 func TestHandleSessionSummaryCreatesProjectScopedSession(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSessionSummary(s, MCPConfig{})
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "Worked on auth module",
@@ -1445,7 +1446,7 @@ func TestHandleSessionSummaryCreatesProjectScopedSession(t *testing.T) {
 
 func TestHandleCapturePassiveCreatesProjectScopedSession(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{})
+	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "## Key Learnings:\nAuth needs rate limiting",
@@ -1463,7 +1464,7 @@ func TestHandleCapturePassiveCreatesProjectScopedSession(t *testing.T) {
 
 func TestExplicitSessionIDBypassesDefault(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{})
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Provide explicit session_id — should NOT use defaultSessionID
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -1526,7 +1527,7 @@ func TestNewServerWithConfig(t *testing.T) {
 func TestHandleSaveDefaultProjectFillIn(t *testing.T) {
 	s := newMCPTestStore(t)
 	cfg := MCPConfig{DefaultProject: "myproject"}
-	h := handleSave(s, cfg)
+	h := handleSave(s, cfg, NewSessionActivity(10*time.Minute))
 
 	// Send empty project — should use default
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -1558,7 +1559,7 @@ func TestHandleSaveDefaultProjectFillIn(t *testing.T) {
 
 func TestHandleSaveNormalizationWarning(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{})
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Send mixed-case project name — should be normalized and warning returned
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -1592,7 +1593,7 @@ func TestHandleSaveNormalizationWarning(t *testing.T) {
 
 func TestHandleSaveSimilarProjectWarning(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{})
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// First save to "engram" to establish an existing project
 	req1 := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -1637,7 +1638,7 @@ func TestHandleSaveSimilarProjectWarning(t *testing.T) {
 
 func TestHandleSaveNoSimilarWarningWhenProjectExists(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{})
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Save twice to the same project — second save should NOT show similar project warning
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -1801,7 +1802,7 @@ func TestHandleMergeProjectsIsDeferred(t *testing.T) {
 func TestHandleSaveDefaultProjectDoesNotOverrideExplicit(t *testing.T) {
 	s := newMCPTestStore(t)
 	cfg := MCPConfig{DefaultProject: "default-project"}
-	h := handleSave(s, cfg)
+	h := handleSave(s, cfg, NewSessionActivity(10*time.Minute))
 
 	// Explicit project should override default
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -1825,5 +1826,184 @@ func TestHandleSaveDefaultProjectDoesNotOverrideExplicit(t *testing.T) {
 	}
 	if len(defaultObs) > 0 {
 		t.Fatal("observation should NOT be in default-project")
+	}
+}
+
+func TestSearchResponseIncludesNudgeAfterInactivity(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	// Seed a memory to search for
+	s.CreateSession("s1", "myproject", "")
+	s.AddObservation(store.AddObservationParams{
+		SessionID: "s1",
+		Type:      "manual",
+		Title:     "test memory",
+		Content:   "some content",
+		Project:   "myproject",
+	})
+
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	activity := NewSessionActivity(10 * time.Minute)
+	activity.now = func() time.Time { return now }
+
+	sessionID := defaultSessionID("myproject")
+
+	// Simulate prior activity: > 5 tool calls so nudge criteria is met
+	for i := 0; i < 6; i++ {
+		activity.RecordToolCall(sessionID)
+	}
+
+	// Advance time past nudge threshold
+	now = now.Add(15 * time.Minute)
+
+	search := handleSearch(s, MCPConfig{}, activity)
+	res, err := search(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"query":   "test memory",
+			"project": "myproject",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "No mem_save calls for this project") {
+		t.Fatalf("expected nudge in search response, got: %q", text)
+	}
+}
+
+func TestSessionSummaryResponseIncludesActivityScore(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	activity := NewSessionActivity(10 * time.Minute)
+	activity.now = func() time.Time { return now }
+
+	// Use defaultSessionID so we test the real wiring — session summary
+	// looks up activity via defaultSessionID(project), not an explicit session_id.
+	project := "myproject"
+	sessionID := defaultSessionID(project)
+
+	// Simulate activity
+	for i := 0; i < 12; i++ {
+		activity.RecordToolCall(sessionID)
+	}
+	activity.RecordSave(sessionID)
+	activity.RecordSave(sessionID)
+
+	summary := handleSessionSummary(s, MCPConfig{}, activity)
+	res, err := summary(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"project": project,
+			"content": "## Goal\nTest session",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "Session activity:") {
+		t.Fatalf("expected activity score in session summary response, got: %q", text)
+	}
+	if !strings.Contains(text, "12 tool calls") {
+		t.Fatalf("expected 12 tool calls in score, got: %q", text)
+	}
+	if !strings.Contains(text, "2 saves") {
+		t.Fatalf("expected 2 saves in score, got: %q", text)
+	}
+}
+
+func TestSessionEndClearsActivity(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	activity := NewSessionActivity(10 * time.Minute)
+	project := "myproject"
+	sessionID := defaultSessionID(project)
+
+	// Record some activity
+	activity.RecordToolCall(sessionID)
+	activity.RecordSave(sessionID)
+
+	// Verify activity exists
+	score := activity.ActivityScore(sessionID)
+	if score == "" {
+		t.Fatal("expected activity score before session end")
+	}
+
+	// Create session in store so EndSession works
+	s.CreateSession("real-session-id", project, "")
+
+	end := handleSessionEnd(s, MCPConfig{DefaultProject: project}, activity)
+	_, err := end(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id": "real-session-id",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	// Activity should be cleared
+	score = activity.ActivityScore(sessionID)
+	if score != "" {
+		t.Fatalf("expected empty activity after session end, got: %q", score)
+	}
+}
+
+func TestCapturePassiveRecordsToolCall(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	activity := NewSessionActivity(10 * time.Minute)
+	project := "myproject"
+	sessionID := defaultSessionID(project)
+
+	capture := handleCapturePassive(s, MCPConfig{DefaultProject: project}, activity)
+	_, err := capture(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"content": "## Key Learnings:\n1. Test learning",
+			"project": project,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	// Verify tool call was recorded
+	score := activity.ActivityScore(sessionID)
+	if !strings.Contains(score, "1 tool call") {
+		t.Fatalf("expected 1 tool call recorded for capture passive, got: %q", score)
+	}
+}
+
+func TestSessionStartUsesDefaultSessionID(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	activity := NewSessionActivity(10 * time.Minute)
+	project := "myproject"
+
+	start := handleSessionStart(s, MCPConfig{}, activity)
+	_, err := start(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id":      "real-unique-session-id",
+			"project": project,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	// Activity should be recorded under defaultSessionID, not the real session ID
+	defaultSID := defaultSessionID(project)
+	score := activity.ActivityScore(defaultSID)
+	if !strings.Contains(score, "1 tool call") {
+		t.Fatalf("expected activity under defaultSessionID, got: %q", score)
+	}
+
+	// The real session ID should NOT have activity
+	realScore := activity.ActivityScore("real-unique-session-id")
+	if realScore != "" {
+		t.Fatalf("expected no activity under real session ID, got: %q", realScore)
 	}
 }
