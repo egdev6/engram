@@ -10,6 +10,7 @@
 <p align="center">
   <a href="docs/INSTALLATION.md">Installation</a> &bull;
   <a href="docs/AGENT-SETUP.md">Agent Setup</a> &bull;
+  <a href="docs/TEAM-USAGE.md">Team Usage</a> &bull;
   <a href="docs/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="docs/PLUGINS.md">Plugins</a> &bull;
   <a href="CONTRIBUTING.md">Contributing</a> &bull;

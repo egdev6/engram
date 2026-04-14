@@ -28,6 +28,7 @@ For other docs:
 |-----|-------------|
 | [Installation](docs/INSTALLATION.md) | All install methods + platform support |
 | [Agent Setup](docs/AGENT-SETUP.md) | Per-agent configuration + compaction survival |
+| [Team Usage](docs/TEAM-USAGE.md) | Scope conventions, language strategy, git sync for teams |
 | [Architecture](docs/ARCHITECTURE.md) | How it works, session lifecycle, CLI reference, project structure |
 | [Plugins](docs/PLUGINS.md) | OpenCode & Claude Code plugin details |
 | [Comparison](docs/COMPARISON.md) | Why Engram vs claude-mem |
