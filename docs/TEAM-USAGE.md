@@ -26,7 +26,8 @@ Every observation in Engram has a `scope` parameter with two possible values:
 
 **Shared team memory** — intended for knowledge that benefits the whole team.
 
-- Included in all queries by default (visible to all agents)
+- Default scope when saving observations (if not explicitly set to `personal`)
+- Included in queries unless caller filters to `scope: personal` only
 - When you export/sync to a shared git repo and teammates import, they receive these observations
 - Use for decisions, patterns, conventions, and discoveries the team should know about
 
@@ -49,7 +50,9 @@ Every observation in Engram has a `scope` parameter with two possible values:
 Ask yourself: **"Should a teammate's AI agent find this?"**
 
 - **Yes** → `scope: project`
-- **No** → `scope: personal`
+- **No** → `scope: personal` (but remember: if you sync this project to a shared repo, teammates will still import personal-scope observations)
+
+For truly private notes, use a separate project name (e.g., `myproject-personal`) and sync to a private git repo.
 
 ---
 
@@ -199,7 +202,7 @@ Engram uses git to sync observations across devices and teammates.
 **Key points**:
 - Each `engram sync` creates a **new chunk** (never modifies old ones), minimizing conflicts
 - `manifest.json` is updated on each export and can still conflict during concurrent edits; pulling before exporting reduces manifest merge conflicts
-- Chunk files have `.jsonl.gz` extension but contain **gzipped JSON** (single object per chunk), not JSONL
+- Chunk files have `.jsonl.gz` extension but currently contain **a single gzipped JSON object** (despite the `.jsonl.gz` naming)
 - Imported chunk IDs are tracked in the **local SQLite database** (table `sync_chunks`), not in the `.engram/` directory
 - Sync is **project-based**, not scope-based
 - By default, syncs observations for the current project (detected from git repo)
