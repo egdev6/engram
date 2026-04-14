@@ -261,7 +261,7 @@ git commit -m "sync: add new observations"
 git push
 ```
 
-**Tip**: The sync repo should contain ONLY the `.engram/` directory. Run `engram sync` from inside the sync repo, or automate with a git hook.
+**Tip**: The sync repo should contain ONLY the `.engram/` directory. When running `engram sync` from inside a dedicated sync repo, always pass `--project <actual-project>` (or use `--all`, or set `ENGRAM_PROJECT`) so Engram does not auto-detect the sync repo name as the project. You can also automate this with a git hook.
 
 ---
 
