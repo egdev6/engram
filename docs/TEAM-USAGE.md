@@ -35,10 +35,14 @@ Every observation in Engram has a `scope` parameter with two possible values:
 
 **Your personal workspace** — visible only to you and your AI agents.
 
-- Syncs via git to your personal sync repository (separate from the team repo)
-- Only accessible on your devices
-- Not shared with teammates
+- Only visible in local database queries filtered by `scope: personal`
+- Not shared with teammates in normal workflows
 - Use for your own learnings, preferences, notes, and explorations
+
+**Important**: `engram sync` exports **all observations for a project**, regardless of scope. If you sync a project containing `scope: personal` observations to a shared git repository, teammates will import them. To keep personal notes truly private:
+- Use a different project name (e.g., `myproject-personal` vs `myproject`)
+- Maintain a separate `.engram/` sync directory for personal projects
+- Or simply avoid using `scope: personal` for sensitive information in shared projects
 
 ### Rule of Thumb
 
@@ -85,37 +89,17 @@ For most international teams, this is **English** — the same language used for
 
 **Example for a Spanish-speaking team at a US company**:
 
-```bash
-# Shared project memory — always English
-engram mcp <<EOF
-{
-  "method": "tools/call",
-  "params": {
-    "name": "mem_save",
-    "arguments": {
-      "title": "JWT authentication in auth.go",
-      "content": "**What**: Implemented JWT authentication...",
-      "scope": "project"
-    }
-  }
-}
-EOF
+When saving shared project memory, use English:
+- Title: "JWT authentication in auth.go"
+- Content: "**What**: Implemented JWT authentication... **Why**: Session storage doesn't scale..."
+- Scope: `project`
 
-# Personal notes — Spanish is fine
-engram mcp <<EOF
-{
-  "method": "tools/call",
-  "params": {
-    "name": "mem_save",
-    "arguments": {
-      "title": "Aprendizaje sobre middleware de autenticación",
-      "content": "**Qué**: Aprendí que el middleware debe validar...",
-      "scope": "personal"
-    }
-  }
-}
-EOF
-```
+For personal notes, Spanish is fine:
+- Title: "Aprendizaje sobre middleware de autenticación"
+- Content: "**Qué**: Aprendí que el middleware debe validar..."
+- Scope: `personal`
+
+Note: Your AI agent (Claude, OpenCode, Codex, etc.) will call `mem_save` for you when you ask it to save observations. You typically don't need to craft MCP JSON manually.
 
 ---
 
@@ -154,22 +138,15 @@ Use for knowledge that helps the whole team:
 
 **Example**:
 
-```bash
-engram mcp <<EOF
-{
-  "method": "tools/call",
-  "params": {
-    "name": "mem_save",
-    "arguments": {
-      "title": "Next.js middleware edge runtime limitation",
-      "content": "**What**: Next.js middleware runs on edge runtime and cannot use Node.js fs module\n**Why**: Discovered while trying to read config files in middleware\n**Where**: middleware.ts\n**Learned**: Use environment variables or edge-compatible APIs instead",
-      "type": "discovery",
-      "scope": "project"
-    }
-  }
-}
-EOF
-```
+**Example**: Ask your AI agent to save a discovery about Next.js middleware:
+
+> "Save this to project memory: Next.js middleware runs on edge runtime and cannot use Node.js fs module. I discovered this while trying to read config files in middleware. Use environment variables or edge-compatible APIs instead."
+
+The agent will create an observation with:
+- Title: "Next.js middleware edge runtime limitation"
+- Type: `discovery`
+- Scope: `project`
+- Content formatted with What/Why/Where/Learned structure
 
 ---
 
@@ -198,22 +175,11 @@ Use for your own notes, experiments, and preferences:
 
 **Example**:
 
-```bash
-engram mcp <<EOF
-{
-  "method": "tools/call",
-  "params": {
-    "name": "mem_save",
-    "arguments": {
-      "title": "Personal preference: Zustand over Redux",
-      "content": "**What**: I prefer Zustand for state management in small projects\n**Why**: Less boilerplate, simpler API, easier to test\n**Learned**: Redux is still better for large apps with complex state",
-      "type": "preference",
-      "scope": "personal"
-    }
-  }
-}
-EOF
-```
+**Example**: Ask your AI agent to save a personal preference:
+
+> "Save to my personal notes: I prefer Zustand over Redux for small projects because it has less boilerplate and a simpler API. Redux is still better for large apps with complex state."
+
+The agent will create an observation with scope `personal` — visible only in your local database.
 
 ---
 
@@ -221,10 +187,26 @@ EOF
 
 Engram uses git to sync observations across devices and teammates.
 
-### Setup Overview
+### How Sync Works
 
-1. **Team sync repository** — shared repo for `scope: project` observations
-2. **Personal sync repository** — your own repo for `scope: personal` observations
+`engram sync` exports observations to a `.engram/` directory structure:
+
+```
+.engram/
+├── manifest.json             ← Index of all chunks (small, mergeable)
+├── chunks/
+│   ├── a3f8c1d2.jsonl.gz    ← Chunk 1 (gzipped JSONL)
+│   ├── b7d2e4f1.jsonl.gz    ← Chunk 2
+│   └── ...
+└── sync_chunks              ← Tracks imported chunks (prevents duplicates)
+```
+
+**Key points**:
+- Each `engram sync` creates a **new chunk** (never modifies old ones → no git conflicts)
+- Sync is **project-based**, not scope-based
+- By default, syncs observations for the current project (detected from git repo)
+- Use `--all` to export ALL projects
+- Use `--project <name>` to specify a different project
 
 ### Team Sync Workflow
 
@@ -238,64 +220,69 @@ One team member creates a git repo for shared project memory:
 # Make it private if your project is proprietary
 ```
 
-#### Step 2: Each Developer Configures the Team Sync Repo
+#### Step 2: Clone and Initialize
+
+Each team member clones the sync repo:
 
 ```bash
-# Clone the team sync repo
+# Clone the team sync repo to your local machine
 git clone git@github.com:your-org/your-project-engram-sync.git ~/team-engram-sync
+cd ~/team-engram-sync
 
-# Configure engram to use it for project-scoped observations
-# (This would be done via engram CLI — consult `engram sync --help` for exact commands)
+# Initial sync structure will be created automatically on first export
 ```
 
-#### Step 3: Regular Sync
+#### Step 3: Regular Sync Workflow
 
 ```bash
-# Export project-scoped observations to git
-engram sync export --scope project --output ~/team-engram-sync
-
-# Commit and push
+# Navigate to the sync repository
 cd ~/team-engram-sync
-git add .
-git commit -m "sync: update project memory"
-git push
 
-# Pull teammates' updates
+# Pull latest changes from teammates
 git pull
 
-# Import into your local engram database
-engram sync import --scope project --input ~/team-engram-sync
+# Import new chunks into your local database
+engram sync --import
+
+# Work on the project, create observations with your AI agent
+# ...
+
+# Export new observations to the sync repo
+# (Run this from the sync repo directory)
+engram sync --project myproject
+
+# Or export ALL projects:
+# engram sync --all
+
+# Commit and push the new chunk
+git add .engram/
+git commit -m "sync: add new observations"
+git push
 ```
 
-**Tip**: Automate this with a git hook or cron job.
+**Tip**: The sync repo should contain ONLY the `.engram/` directory. Run `engram sync` from inside the sync repo, or automate with a git hook.
 
 ---
 
-### Personal Sync Workflow
+### Syncing Personal Notes Separately
 
-For syncing your personal observations across your own devices:
+If you want to keep personal notes on multiple devices **without sharing them with the team**, use a separate project name:
 
 ```bash
-# Create your personal sync repo (private)
-# Example: your-username/engram-personal-sync
+# Use a different project name for personal work
+# Example: when saving personal observations, use project "myname-notes"
 
-# Clone it
-git clone git@github.com:your-username/engram-personal-sync.git ~/personal-engram-sync
+# Create a separate sync repo (private)
+git clone git@github.com:your-username/engram-personal.git ~/engram-personal
+cd ~/engram-personal
 
-# Export personal observations
-engram sync export --scope personal --output ~/personal-engram-sync
+# Sync only your personal project
+engram sync --project myname-notes
 
-# Commit and push
-cd ~/personal-engram-sync
-git add .
-git commit -m "sync: laptop to desktop"
-git push
-
-# On another device: pull and import
-cd ~/personal-engram-sync
-git pull
-engram sync import --scope personal --input ~/personal-engram-sync
+# This keeps your personal notes separate from the team's shared project
 ```
+
+**Important**: `engram sync` exports ALL observations for a project, including both `scope: project` and `scope: personal`. The `scope` field is a logical filter for queries, not an access control mechanism. If you mix personal and team observations in the same project and sync it, teammates will import everything.
 
 ---
 
@@ -315,31 +302,40 @@ Example: A team in Spain where everyone speaks Spanish can use Spanish for share
 
 ### Do personal observations sync to the team repo?
 
-**No**. `scope: personal` observations only sync to your **personal sync repository**, not the team's shared repo.
+**It depends**. `engram sync` exports ALL observations for a project, regardless of scope. If you have both `scope: personal` and `scope: project` observations in the same project and run `engram sync`, both will be exported to the sync repo.
+
+To keep personal notes separate:
+- Use a different project name for personal work (e.g., `myname-notes`)
+- Sync that project to a separate, private git repository
+- Never sync personal projects to the team's shared repo
+
+The `scope` field is a logical filter for queries (e.g., `mem_search --scope personal`), not an access control mechanism for git sync.
 
 ### Can I change an observation's scope after saving it?
 
-Yes. Use `mem_update` to change the `scope` field:
+Yes. Ask your AI agent to update the observation's scope:
+
+> "Update observation #123 to scope: project"
+
+Or use the HTTP API directly:
 
 ```bash
-engram mcp <<EOF
-{
-  "method": "tools/call",
-  "params": {
-    "name": "mem_update",
-    "arguments": {
-      "id": 123,
-      "scope": "project"
-    }
-  }
-}
-EOF
+curl -X PATCH http://127.0.0.1:7437/observations/123 \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"project"}'
 ```
 
 ### How do I know if an observation is `project` or `personal`?
 
-Use `mem_search` or `mem_get_observation` — the response includes the `scope` field:
+Ask your AI agent to search or retrieve the observation. The response will include the `scope` field. 
 
+Or query the HTTP API directly:
+
+```bash
+curl http://127.0.0.1:7437/observations/123
+```
+
+Response includes:
 ```json
 {
   "id": 123,
@@ -351,20 +347,39 @@ Use `mem_search` or `mem_get_observation` — the response includes the `scope` 
 
 ### What happens if I accidentally save sensitive info in `scope: project`?
 
-**Delete it immediately**:
+**Delete it immediately and notify your team**:
 
+1. **Hard delete from local database**:
 ```bash
-# Hard delete (removes from database completely)
-curl -X DELETE http://127.0.0.1:7437/observations/123?hard=true
-
-# Also remove from git sync repo
-cd ~/team-engram-sync
-git rm <affected-file>
-git commit -m "remove: sensitive observation #123"
-git push
+curl -X DELETE "http://127.0.0.1:7437/observations/123?hard=true"
 ```
 
-Then notify your team to pull and re-import.
+2. **Remove from git sync repo**:
+
+The observation is embedded in a compressed chunk file (`.engram/chunks/*.jsonl.gz`). Removing a single observation from a chunk is complex:
+
+**Option A: Rewrite git history** (if the leak was recent):
+```bash
+cd ~/team-engram-sync
+# Identify which chunk contains the observation (check manifest.json timestamps)
+# Remove the chunk file and update manifest.json
+git filter-branch --force --index-filter \
+  "git rm --cached --ignore-unmatch .engram/chunks/<chunk-id>.jsonl.gz" HEAD
+git push --force
+```
+
+**Option B: Accept the exposure** and rotate credentials:
+- The chunk is already distributed to teammates who ran `git pull`
+- Assume the secret is compromised
+- Rotate the leaked credential/token immediately
+- Delete the observation locally to prevent future exports
+
+3. **Notify teammates** to:
+   - Pull the updated repo (if you rewrote history)
+   - Delete the observation from their local databases
+   - Update any affected credentials
+
+**Prevention**: Avoid saving API keys, tokens, or passwords in observations. Use environment variables or secret management tools instead.
 
 ### Can I have different `scope` conventions per project?
 
@@ -376,12 +391,13 @@ Yes. Each project has its own observations. You can configure scope/language con
 
 | Aspect | `scope: project` | `scope: personal` |
 |--------|------------------|-------------------|
-| **Visibility** | Shared with team | Only you |
+| **Visibility** | Shared with team via queries | Only visible in filtered queries |
 | **Language** | Team lingua franca (usually English) | Any language |
-| **Sync repo** | Team's shared git repo | Your personal git repo |
+| **Sync behavior** | Exported with project to git | Exported with project to git (same as project scope) |
+| **Best practice** | Use for team knowledge | Use in separate project, sync to private repo |
 | **Use for** | Decisions, patterns, discoveries, team conventions | Personal learnings, preferences, experiments |
 
-**Golden rule**: If a teammate's AI agent should find it → `scope: project` in the team's lingua franca. Otherwise → `scope: personal` in any language.
+**Golden rule**: If a teammate's AI agent should find it → `scope: project` in the team's lingua franca. For truly private notes → use a separate project name and sync to a private repo.
 
 ---
 
