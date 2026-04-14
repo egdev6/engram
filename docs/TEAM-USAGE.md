@@ -33,10 +33,11 @@ Every observation in Engram has a `scope` parameter with two possible values:
 
 ### `scope: personal`
 
-**Your personal workspace** — visible only to you and your AI agents.
+**Your personal workspace** — a logical tag for organizing observations.
 
-- Only visible in local database queries filtered by `scope: personal`
-- Not shared with teammates in normal workflows
+- `scope` is a filter/tag, not an access control mechanism
+- Searches without a scope filter return BOTH `project` and `personal` observations
+- The `scope` field appears in results so you can distinguish them
 - Use for your own learnings, preferences, notes, and explorations
 
 **Important**: `engram sync` exports **all observations for a project**, regardless of scope. If you sync a project containing `scope: personal` observations to a shared git repository, teammates will import them. To keep personal notes truly private:
@@ -136,8 +137,6 @@ Use for knowledge that helps the whole team:
 - Local development setup steps
 - CI/CD pipeline quirks
 
-**Example**:
-
 **Example**: Ask your AI agent to save a discovery about Next.js middleware:
 
 > "Save this to project memory: Next.js middleware runs on edge runtime and cannot use Node.js fs module. I discovered this while trying to read config files in middleware. Use environment variables or edge-compatible APIs instead."
@@ -173,8 +172,6 @@ Use for your own notes, experiments, and preferences:
 - Ideas to explore later
 - Personal TODO items
 
-**Example**:
-
 **Example**: Ask your AI agent to save a personal preference:
 
 > "Save to my personal notes: I prefer Zustand over Redux for small projects because it has less boilerplate and a simpler API. Redux is still better for large apps with complex state."
@@ -194,15 +191,16 @@ Engram uses git to sync observations across devices and teammates.
 ```
 .engram/
 ├── manifest.json             ← Index of all chunks (small, mergeable)
-├── chunks/
-│   ├── a3f8c1d2.jsonl.gz    ← Chunk 1 (gzipped JSONL)
-│   ├── b7d2e4f1.jsonl.gz    ← Chunk 2
-│   └── ...
-└── sync_chunks              ← Tracks imported chunks (prevents duplicates)
+└── chunks/
+    ├── a3f8c1d2.jsonl.gz    ← Chunk 1 (gzipped JSON)
+    ├── b7d2e4f1.jsonl.gz    ← Chunk 2
+    └── ...
 ```
 
 **Key points**:
 - Each `engram sync` creates a **new chunk** (never modifies old ones → no git conflicts)
+- Chunk files have `.jsonl.gz` extension but contain **gzipped JSON** (single object per chunk), not JSONL
+- Imported chunk IDs are tracked in the **local SQLite database** (table `sync_chunks`), not in the `.engram/` directory
 - Sync is **project-based**, not scope-based
 - By default, syncs observations for the current project (detected from git repo)
 - Use `--all` to export ALL projects
@@ -309,7 +307,7 @@ To keep personal notes separate:
 - Sync that project to a separate, private git repository
 - Never sync personal projects to the team's shared repo
 
-The `scope` field is a logical filter for queries (e.g., `mem_search --scope personal`), not an access control mechanism for git sync.
+The `scope` field is a logical filter for queries (e.g., your AI agent can filter searches by passing `scope: "personal"` as a parameter), not an access control mechanism for git sync.
 
 ### Can I change an observation's scope after saving it?
 
@@ -362,11 +360,22 @@ The observation is embedded in a compressed chunk file (`.engram/chunks/*.jsonl.
 ```bash
 cd ~/team-engram-sync
 # Identify which chunk contains the observation (check manifest.json timestamps)
-# Remove the chunk file and update manifest.json
-git filter-branch --force --index-filter \
-  "git rm --cached --ignore-unmatch .engram/chunks/<chunk-id>.jsonl.gz" HEAD
+# Remove the chunk file using git-filter-repo (recommended) or BFG Repo-Cleaner
+
+# Using git-filter-repo:
+git filter-repo --path .engram/chunks/<chunk-id>.jsonl.gz --invert-paths
+
+# Or using BFG:
+# bfg --delete-files <chunk-id>.jsonl.gz
+
 git push --force
 ```
+
+**Important**: After rewriting history, all collaborators must either:
+- Re-clone the repository, OR
+- Run `git fetch --all && git reset --hard origin/main` (loses local changes)
+
+History rewriting is disruptive for teams. Use Option B if multiple people have already pulled the leaked chunk.
 
 **Option B: Accept the exposure** and rotate credentials:
 - The chunk is already distributed to teammates who ran `git pull`
@@ -391,7 +400,8 @@ Yes. Each project has its own observations. You can configure scope/language con
 
 | Aspect | `scope: project` | `scope: personal` |
 |--------|------------------|-------------------|
-| **Visibility** | Shared with team via queries | Only visible in filtered queries |
+| **Visibility** | Included in all queries (default) | Included in all queries (default) |
+| **Filtering** | Queries can filter to project-only | Queries can filter to personal-only |
 | **Language** | Team lingua franca (usually English) | Any language |
 | **Sync behavior** | Exported with project to git | Exported with project to git (same as project scope) |
 | **Best practice** | Use for team knowledge | Use in separate project, sync to private repo |
