@@ -24,12 +24,11 @@ Every observation in Engram has a `scope` parameter with two possible values:
 
 ### `scope: project` (default)
 
-**Shared team memory** — visible to all team members and their AI agents.
+**Shared team memory** — intended for knowledge that benefits the whole team.
 
-- Syncs via git to the team's shared sync repository
-- Accessible to everyone working on the project
-- Searchable by all teammates and their agents
-- Use for decisions, patterns, conventions, and discoveries that benefit the whole team
+- Included in all queries by default (visible to all agents)
+- When you export/sync to a shared git repo and teammates import, they receive these observations
+- Use for decisions, patterns, conventions, and discoveries the team should know about
 
 ### `scope: personal`
 
@@ -40,7 +39,7 @@ Every observation in Engram has a `scope` parameter with two possible values:
 - The `scope` field appears in results so you can distinguish them
 - Use for your own learnings, preferences, notes, and explorations
 
-**Important**: `engram sync` exports **all observations for a project**, regardless of scope. If you sync a project containing `scope: personal` observations to a shared git repository, teammates will import them. To keep personal notes truly private:
+**Important**: When you run `engram sync`, it exports observations for the specified project (including both `scope: project` and `scope: personal`) into a new chunk. Over time, these chunks collectively contain all observations you've exported for that project. If you sync to a shared git repository and teammates import, they receive everything — regardless of scope. To keep personal notes truly private:
 - Use a different project name (e.g., `myproject-personal` vs `myproject`)
 - Maintain a separate `.engram/` sync directory for personal projects
 - Or simply avoid using `scope: personal` for sensitive information in shared projects
@@ -176,7 +175,7 @@ Use for your own notes, experiments, and preferences:
 
 > "Save to my personal notes: I prefer Zustand over Redux for small projects because it has less boilerplate and a simpler API. Redux is still better for large apps with complex state."
 
-The agent will create an observation with scope `personal` — visible only in your local database.
+The agent will create an observation with scope `personal` — visible in your local database (and included if you later sync/export this project to a shared repo).
 
 ---
 
@@ -198,7 +197,8 @@ Engram uses git to sync observations across devices and teammates.
 ```
 
 **Key points**:
-- Each `engram sync` creates a **new chunk** (never modifies old ones → no git conflicts)
+- Each `engram sync` creates a **new chunk** (never modifies old ones), minimizing conflicts
+- `manifest.json` is updated on each export and can still conflict during concurrent edits; pulling before exporting reduces manifest merge conflicts
 - Chunk files have `.jsonl.gz` extension but contain **gzipped JSON** (single object per chunk), not JSONL
 - Imported chunk IDs are tracked in the **local SQLite database** (table `sync_chunks`), not in the `.engram/` directory
 - Sync is **project-based**, not scope-based
