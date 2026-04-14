@@ -33,10 +33,11 @@ Every observation in Engram has a `scope` parameter with two possible values:
 
 ### `scope: personal`
 
-**Your personal workspace** — visible only to you and your AI agents.
+**Your personal workspace** — intended for observations that are local to you and your AI agents.
 
-- Only visible in local database queries filtered by `scope: personal`
-- Not shared with teammates in normal workflows
+- `scope` is a logical tag/filter, not a hidden/private storage mode
+- Search tools may include both `project` and `personal` observations by default unless you apply a `scope` filter
+- Not shared with teammates in normal workflows unless you export or sync them
 - Use for your own learnings, preferences, notes, and explorations
 
 **Important**: `engram sync` exports **all observations for a project**, regardless of scope. If you sync a project containing `scope: personal` observations to a shared git repository, teammates will import them. To keep personal notes truly private:
