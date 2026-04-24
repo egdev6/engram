@@ -526,6 +526,41 @@ func New(cfg Config) (*Store, error) {
 	return s, nil
 }
 
+// newWithoutRepair is the same as New but skips repairEnrolledProjectSyncMutations.
+// It exists solely to support tests that need to seed data and call repair manually.
+func newWithoutRepair(cfg Config) (*Store, error) {
+	if !filepath.IsAbs(cfg.DataDir) {
+		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
+	}
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		return nil, fmt.Errorf("engram: create data dir: %w", err)
+	}
+
+	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	db, err := openDB("sqlite", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("engram: open database: %w", err)
+	}
+
+	pragmas := []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA busy_timeout = 5000",
+		"PRAGMA synchronous = NORMAL",
+		"PRAGMA foreign_keys = ON",
+	}
+	for _, p := range pragmas {
+		if _, err := db.Exec(p); err != nil {
+			return nil, fmt.Errorf("engram: pragma %q: %w", p, err)
+		}
+	}
+
+	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
+	if err := s.migrate(); err != nil {
+		return nil, fmt.Errorf("engram: migration: %w", err)
+	}
+	return s, nil
+}
+
 func (s *Store) Close() error {
 	return s.db.Close()
 }
@@ -777,6 +812,7 @@ func (s *Store) migrate() error {
 	}
 	if _, err := s.execHook(s.db, `
 		CREATE INDEX IF NOT EXISTS idx_cloud_upgrade_state_stage ON cloud_upgrade_state(stage);
+		CREATE INDEX IF NOT EXISTS idx_sync_mutations_lookup ON sync_mutations(target_key, entity, entity_key, source);
 	`); err != nil {
 		return err
 	}
@@ -3992,35 +4028,95 @@ func (s *Store) backfillProjectSyncMutationsTx(tx *sql.Tx, project string) error
 	return s.backfillPromptSyncMutationsTx(tx, project)
 }
 
+// projectNeedsBackfill returns true when a project has any sessions, live observations,
+// or prompts that are missing a corresponding sync_mutation row.
+// It runs three lightweight COUNT queries — no cursor is held open.
+func (s *Store) projectNeedsBackfill(project string) (bool, error) {
+	type countQuery struct {
+		q    string
+		args []any
+	}
+	queries := []countQuery{
+		{
+			q: `SELECT COUNT(*) FROM sessions
+			    WHERE project = ?
+			      AND NOT EXISTS (
+			        SELECT 1 FROM sync_mutations sm
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = sessions.id AND sm.source = ?
+			      )`,
+			args: []any{project, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal},
+		},
+		{
+			q: `SELECT COUNT(*) FROM observations o
+			    LEFT JOIN sessions s ON s.id = o.session_id
+			    WHERE (ifnull(o.project,'') = ? OR (ifnull(o.project,'') = '' AND ifnull(s.project,'') = ?))
+			      AND o.deleted_at IS NULL
+			      AND NOT EXISTS (
+			        SELECT 1 FROM sync_mutations sm
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = o.sync_id AND sm.source = ?
+			      )`,
+			args: []any{project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal},
+		},
+		{
+			q: `SELECT COUNT(*) FROM user_prompts p
+			    LEFT JOIN sessions s ON s.id = p.session_id
+			    WHERE (ifnull(p.project,'') = ? OR (ifnull(p.project,'') = '' AND ifnull(s.project,'') = ?))
+			      AND NOT EXISTS (
+			        SELECT 1 FROM sync_mutations sm
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = p.sync_id AND sm.source = ?
+			      )`,
+			args: []any{project, project, DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal},
+		},
+	}
+	for _, cq := range queries {
+		var n int
+		if err := s.db.QueryRow(cq.q, cq.args...).Scan(&n); err != nil {
+			return false, err
+		}
+		if n > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Store) repairEnrolledProjectSyncMutations() error {
-	return s.withTx(func(tx *sql.Tx) error {
-		rows, err := s.queryItHook(tx,
-			`SELECT project FROM sync_enrolled_projects ORDER BY project ASC`,
-		)
+	// Collect enrolled projects outside a transaction so we avoid holding a read
+	// cursor open while we later write inside backfillProjectSyncMutationsTx.
+	rows, err := s.db.Query(`SELECT project FROM sync_enrolled_projects ORDER BY project ASC`)
+	if err != nil {
+		return err
+	}
+	var projects []string
+	for rows.Next() {
+		var project string
+		if err := rows.Scan(&project); err != nil {
+			rows.Close()
+			return err
+		}
+		projects = append(projects, project)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, project := range projects {
+		// Fast path: if the project is already fully backfilled, skip the write tx entirely.
+		needs, err := s.projectNeedsBackfill(project)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-
-		var projects []string
-		for rows.Next() {
-			var project string
-			if err := rows.Scan(&project); err != nil {
-				return err
-			}
-			projects = append(projects, project)
+		if !needs {
+			continue
 		}
-		if err := rows.Err(); err != nil {
+		if err := s.withTx(func(tx *sql.Tx) error {
+			return s.backfillProjectSyncMutationsTx(tx, project)
+		}); err != nil {
 			return err
 		}
-
-		for _, project := range projects {
-			if err := s.backfillProjectSyncMutationsTx(tx, project); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string) error {
@@ -4042,21 +4138,36 @@ func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string) error
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
+	// Phase 1: collect all missing sessions into memory before any INSERT.
+	// Keeping the cursor open while inserting into sync_mutations causes SQLite
+	// to re-evaluate the NOT EXISTS subquery against the in-progress write set,
+	// which can produce an O(N*M) busy loop on large stores.
+	var pending []syncSessionPayload
 	for rows.Next() {
 		var payload syncSessionPayload
 		if err := rows.Scan(&payload.ID, &payload.Project, &payload.Directory, &payload.StartedAt, &payload.EndedAt, &payload.Summary); err != nil {
+			rows.Close()
 			return err
 		}
+		pending = append(pending, payload)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Phase 2: insert now that the read cursor is closed.
+	for _, payload := range pending {
 		if err := s.enqueueSyncMutationTx(tx, SyncEntitySession, payload.ID, SyncOpUpsert, payload); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) error {
+	// ── Live observations ─────────────────────────────────────────────────────
 	rows, err := s.queryItHook(tx, `
 		SELECT o.sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project, o.scope, o.topic_key,
 		       o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at
@@ -4081,8 +4192,9 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
+	// Phase 1: collect live observations before any INSERT.
+	var pending []syncObservationPayload
 	for rows.Next() {
 		var payload syncObservationPayload
 		if err := rows.Scan(
@@ -4101,16 +4213,24 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 			&payload.CreatedAt,
 			&payload.UpdatedAt,
 		); err != nil {
+			rows.Close()
 			return err
 		}
-		if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, payload.SyncID, SyncOpUpsert, payload); err != nil {
-			return err
-		}
+		pending = append(pending, payload)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
 
+	// Phase 2: insert live observation mutations.
+	for _, payload := range pending {
+		if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, payload.SyncID, SyncOpUpsert, payload); err != nil {
+			return err
+		}
+	}
+
+	// ── Deleted observations ──────────────────────────────────────────────────
 	deletedRows, err := s.queryItHook(tx, `
 		SELECT o.sync_id, o.session_id, o.project, o.deleted_at
 		FROM observations o
@@ -4135,23 +4255,35 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 	if err != nil {
 		return err
 	}
-	defer deletedRows.Close()
 
+	// Phase 1: collect deleted observations before any INSERT.
+	var deletedPending []syncObservationPayload
 	for deletedRows.Next() {
 		var payload syncObservationPayload
 		if err := deletedRows.Scan(&payload.SyncID, &payload.SessionID, &payload.Project, &payload.DeletedAt); err != nil {
+			deletedRows.Close()
 			return err
 		}
 		payload.Deleted = true
 		payload.HardDelete = false
+		deletedPending = append(deletedPending, payload)
+	}
+	deletedRows.Close()
+	if err := deletedRows.Err(); err != nil {
+		return err
+	}
+
+	// Phase 2: insert deleted observation mutations.
+	for _, payload := range deletedPending {
 		if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, payload.SyncID, SyncOpDelete, payload); err != nil {
 			return err
 		}
 	}
-	return deletedRows.Err()
+	return nil
 }
 
 func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error {
+	// ── Live prompts ──────────────────────────────────────────────────────────
 	rows, err := s.queryItHook(tx, `
 		SELECT p.sync_id, p.session_id, p.content, p.project, p.created_at
 		FROM user_prompts p
@@ -4174,21 +4306,30 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
+	// Phase 1: collect live prompts before any INSERT.
+	var pending []syncPromptPayload
 	for rows.Next() {
 		var payload syncPromptPayload
 		if err := rows.Scan(&payload.SyncID, &payload.SessionID, &payload.Content, &payload.Project, &payload.CreatedAt); err != nil {
+			rows.Close()
 			return err
 		}
-		if err := s.enqueueSyncMutationTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpUpsert, payload); err != nil {
-			return err
-		}
+		pending = append(pending, payload)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
 
+	// Phase 2: insert live prompt mutations.
+	for _, payload := range pending {
+		if err := s.enqueueSyncMutationTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpUpsert, payload); err != nil {
+			return err
+		}
+	}
+
+	// ── Tombstoned prompts ────────────────────────────────────────────────────
 	tombstoneRows, err := s.queryItHook(tx, `
 		SELECT prompt_tombstones.sync_id, prompt_tombstones.session_id, prompt_tombstones.project, prompt_tombstones.deleted_at
 		FROM prompt_tombstones
@@ -4212,20 +4353,31 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 	if err != nil {
 		return err
 	}
-	defer tombstoneRows.Close()
 
+	// Phase 1: collect tombstones before any INSERT.
+	var tombstonePending []syncPromptPayload
 	for tombstoneRows.Next() {
 		var payload syncPromptPayload
 		if err := tombstoneRows.Scan(&payload.SyncID, &payload.SessionID, &payload.Project, &payload.DeletedAt); err != nil {
+			tombstoneRows.Close()
 			return err
 		}
 		payload.Deleted = true
 		payload.HardDelete = true
+		tombstonePending = append(tombstonePending, payload)
+	}
+	tombstoneRows.Close()
+	if err := tombstoneRows.Err(); err != nil {
+		return err
+	}
+
+	// Phase 2: insert tombstone mutations.
+	for _, payload := range tombstonePending {
 		if err := s.enqueueSyncMutationTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpDelete, payload); err != nil {
 			return err
 		}
 	}
-	return tombstoneRows.Err()
+	return nil
 }
 
 func (s *Store) enqueueSyncMutationTx(tx *sql.Tx, entity, entityKey, op string, payload any) error {

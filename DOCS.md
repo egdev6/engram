@@ -28,6 +28,7 @@ For other docs:
 | Doc | Description |
 |-----|-------------|
 | [Installation](docs/INSTALLATION.md) | All install methods + platform support |
+| [Engram Cloud](docs/engram-cloud/README.md) | Cloud landing page, quickstart path, branding, and reference links |
 | [Agent Setup](docs/AGENT-SETUP.md) | Per-agent configuration + compaction survival |
 | [Architecture](docs/ARCHITECTURE.md) | How it works, session lifecycle, CLI reference, project structure |
 | [Plugins](docs/PLUGINS.md) | OpenCode & Claude Code plugin details |

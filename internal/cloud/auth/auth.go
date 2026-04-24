@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -166,6 +167,16 @@ func (s *Service) AuthorizeProject(project string) error {
 	return authorizeProjectAgainstAllowlist(project, s.allowed)
 }
 
+// EnrolledProjects returns the sorted list of projects that this Service is
+// authorized to serve. Used by cloudserver's mutation pull to filter mutations
+// to the caller's enrolled projects (REQ-202).
+//
+// The interface is cloudserver.EnrolledProjectsProvider; this method makes
+// *Service satisfy it without importing cloudserver (structural assertion).
+func (s *Service) EnrolledProjects() []string {
+	return sortedAllowlist(s.allowed)
+}
+
 func (a *ProjectScopeAuthorizer) SetAllowedProjects(projects []string) {
 	a.allowed = make(map[string]struct{})
 	for _, project := range projects {
@@ -180,6 +191,29 @@ func (a *ProjectScopeAuthorizer) SetAllowedProjects(projects []string) {
 
 func (a *ProjectScopeAuthorizer) AuthorizeProject(project string) error {
 	return authorizeProjectAgainstAllowlist(project, a.allowed)
+}
+
+// EnrolledProjects returns the sorted list of projects this authorizer allows.
+// Matches the cloudserver.EnrolledProjectsProvider contract so mutation pull
+// can filter server-side by the caller's enrolled projects (REQ-202) rather
+// than fail-closing to an empty result set.
+func (a *ProjectScopeAuthorizer) EnrolledProjects() []string {
+	return sortedAllowlist(a.allowed)
+}
+
+// sortedAllowlist returns a sorted slice of the map keys.
+// Isolated to one spot so both Service and ProjectScopeAuthorizer behave
+// identically and tests can pin ordering.
+func sortedAllowlist(allowed map[string]struct{}) []string {
+	if len(allowed) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(allowed))
+	for project := range allowed {
+		out = append(out, project)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func authorizeProjectAgainstAllowlist(project string, allowed map[string]struct{}) error {

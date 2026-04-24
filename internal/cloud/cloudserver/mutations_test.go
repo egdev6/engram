@@ -695,6 +695,88 @@ func TestMutationPullFailsClosedWithoutEnrolledProjectsProvider(t *testing.T) {
 	}
 }
 
+// projectAuthWithEnrollment is an authorizer that ALSO implements
+// EnrolledProjectsProvider. Mirrors the production auth.ProjectScopeAuthorizer
+// and auth.Service shape.
+type projectAuthWithEnrollment struct {
+	token    string
+	enrolled []string
+}
+
+func (p *projectAuthWithEnrollment) Authorize(r *http.Request) error {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != p.token {
+		return fmt.Errorf("unauthorized")
+	}
+	return nil
+}
+
+func (p *projectAuthWithEnrollment) AuthorizeProject(project string) error {
+	for _, enrolled := range p.enrolled {
+		if enrolled == project {
+			return nil
+		}
+	}
+	return fmt.Errorf("project %q not allowed", project)
+}
+
+func (p *projectAuthWithEnrollment) EnrolledProjects() []string {
+	out := make([]string, len(p.enrolled))
+	copy(out, p.enrolled)
+	return out
+}
+
+// TestMutationPullUsesEnrollmentProviderWhenImplemented is the positive
+// counterpart to TestMutationPullFailsClosedWithoutEnrolledProjectsProvider.
+// When projectAuth implements EnrolledProjectsProvider (as *auth.Service and
+// *auth.ProjectScopeAuthorizer both do), the pull MUST return mutations
+// filtered to the enrolled set — not fail-close to empty.
+//
+// Regression guard for the bug where ProjectScopeAuthorizer did not implement
+// EnrolledProjectsProvider, causing every mutation pull to return 0 even
+// though pushes were accepted server-side.
+func TestMutationPullUsesEnrollmentProviderWhenImplemented(t *testing.T) {
+	ms := newFakeMutationStore()
+	for i := 0; i < 3; i++ {
+		_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
+			{Project: "engram", Entity: "obs", EntityKey: fmt.Sprintf("ka%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
+			{Project: "other-tenant", Entity: "obs", EntityKey: fmt.Sprintf("kb%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
+		})
+	}
+
+	authz := &projectAuthWithEnrollment{token: "secret", enrolled: []string{"engram"}}
+	srv := New(ms, authz, 0, WithProjectAuthorizer(authz))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull?since_seq=0&limit=100", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Mutations []struct {
+			Project string `json:"project"`
+		} `json:"mutations"`
+		LatestSeq int64 `json:"latest_seq"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Mutations) != 3 {
+		t.Fatalf("expected 3 mutations (engram only), got %d", len(resp.Mutations))
+	}
+	for _, m := range resp.Mutations {
+		if m.Project != "engram" {
+			t.Errorf("cross-tenant leak: got project %q, want only \"engram\"", m.Project)
+		}
+	}
+	if resp.LatestSeq == 0 {
+		t.Errorf("expected non-zero latest_seq, got 0")
+	}
+}
+
 // ─── BW9: 409 pause gate uses writeActionableError ────────────────────────────
 
 // TestMutationPushPauseGives409WithActionableError verifies BW9:

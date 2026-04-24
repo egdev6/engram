@@ -102,6 +102,67 @@ func TestProjectScopeAuthorizerEnforcesAllowlistWithoutJWT(t *testing.T) {
 	}
 }
 
+// TestProjectScopeAuthorizerEnrolledProjects ensures the authorizer satisfies
+// the cloudserver.EnrolledProjectsProvider contract so mutation pull filters
+// to the allowlist instead of fail-closing to empty.
+//
+// Matches the structural interface:
+//
+//	interface { EnrolledProjects() []string }
+func TestProjectScopeAuthorizerEnrolledProjects(t *testing.T) {
+	cases := []struct {
+		name  string
+		input []string
+		want  []string
+	}{
+		{name: "multiple normalized and sorted", input: []string{"PROJ-B", "proj-a", "PROJ-C"}, want: []string{"proj-a", "proj-b", "proj-c"}},
+		{name: "empty input returns empty slice (not nil)", input: nil, want: []string{}},
+		{name: "duplicates collapsed via normalize", input: []string{"proj-a", "PROJ-A", "proj-a"}, want: []string{"proj-a"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			authorizer := NewProjectScopeAuthorizer(tc.input)
+
+			// Structural assertion matching cloudserver.EnrolledProjectsProvider.
+			var ep interface{ EnrolledProjects() []string } = authorizer
+			got := ep.EnrolledProjects()
+			if got == nil {
+				t.Fatal("EnrolledProjects() returned nil; expected empty slice for fail-open-safe callers")
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("length mismatch: got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("index %d: got %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestServiceEnrolledProjects mirrors the same contract on *Service, which
+// is the production type used by `engram cloud serve` auth wiring.
+func TestServiceEnrolledProjects(t *testing.T) {
+	svc, err := NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	svc.SetAllowedProjects([]string{"engram", "GENTLE-AI", "engram"})
+
+	var ep interface{ EnrolledProjects() []string } = svc
+	got := ep.EnrolledProjects()
+	want := []string{"engram", "gentle-ai"}
+	if len(got) != len(want) {
+		t.Fatalf("length mismatch: got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("index %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestDashboardSessionTokenRoundTrip(t *testing.T) {
 	svc, err := NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
 	if err != nil {

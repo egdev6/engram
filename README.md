@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="docs/INSTALLATION.md">Installation</a> &bull;
-  <a href="docs/ENGRAM-CLOUD.md">Engram Cloud</a> &bull;
+  <a href="docs/engram-cloud/README.md">Engram Cloud</a> &bull;
   <a href="docs/AGENT-SETUP.md">Agent Setup</a> &bull;
   <a href="docs/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="docs/PLUGINS.md">Plugins</a> &bull;
@@ -114,107 +114,35 @@ Full sync documentation → [DOCS.md](DOCS.md)
 
 Cloud is optional. Local SQLite stays authoritative; cloud is replication/shared access only.
 
-> Want the full cloud story? See [docs/ENGRAM-CLOUD.md](docs/ENGRAM-CLOUD.md).
+**Recommended first path (local smoke):**
 
 ```bash
-# 1) SERVER-SIDE runtime config (must be set BEFORE server startup)
-# Option A (docker compose runtime): defaults are included in docker-compose.cloud.yml
-# - ENGRAM_CLOUD_INSECURE_NO_AUTH=1 (browser/dashboard local demo mode)
-# - ENGRAM_CLOUD_ALLOWED_PROJECTS=smoke-project
 docker compose -f docker-compose.cloud.yml up -d
-
-# Option B (source-run runtime): set both token + allowlist before `engram cloud serve`
-ENGRAM_DATABASE_URL="postgres://engram:engram_dev@127.0.0.1:5433/engram_cloud?sslmode=disable" \
-ENGRAM_JWT_SECRET="replace-with-32+-byte-random-secret" \
-ENGRAM_CLOUD_TOKEN="your-token" \
-ENGRAM_CLOUD_ALLOWED_PROJECTS="my-project" \
-engram cloud serve
-
-# For local insecure development only (disables bearer auth, but still enforces project allowlist):
-# ENGRAM_CLOUD_INSECURE_NO_AUTH=1 ENGRAM_CLOUD_ALLOWED_PROJECTS="my-project" engram cloud serve
-
-# 2) CLIENT-SIDE config for CLI sync calls
-# Set cloud endpoint (writes ~/.engram/cloud.json)
-# Option A (docker compose runtime): published :18080
 engram cloud config --server http://127.0.0.1:18080
-
-# Option B (source-run runtime): default :8080
-# engram cloud config --server http://127.0.0.1:8080
-
-# 3) Client auth config (env var; CLI does not persist token for you)
-# compose default runs insecure local demo mode, so keep token unset:
-# client sync preflight only requires the configured cloud server URL,
-# so no client-side ENGRAM_CLOUD_INSECURE_NO_AUTH flag is required here.
-# (if remote server enforces bearer auth, set ENGRAM_CLOUD_TOKEN)
-unset ENGRAM_CLOUD_TOKEN
-# source-run authenticated flow: use the same token value passed to `engram cloud serve`
-# export ENGRAM_CLOUD_TOKEN="your-token"
-
-# 4) Enroll an explicit project
 engram cloud enroll smoke-project
-
-# Recommended guided upgrade path for existing local projects
-engram cloud upgrade doctor --project smoke-project
-engram cloud upgrade repair --project smoke-project --dry-run
-engram cloud upgrade repair --project smoke-project --apply
-engram cloud upgrade bootstrap --project smoke-project --resume
-engram cloud upgrade status --project smoke-project
-# rollback is only available before bootstrap is fully verified
-# engram cloud upgrade rollback --project smoke-project
-
-# 5) Run cloud sync explicitly
 engram sync --cloud --project smoke-project
-engram sync --cloud --status --project smoke-project
-
-# Note: cloud mode requires a single explicit --project scope.
-# `engram sync --cloud --all` is intentionally blocked.
 ```
 
-Deterministic failure reasons are surfaced across CLI and local server (`engram serve` → `/sync/status`):
+Cloud mode is always project-scoped (`--project` is required; `engram sync --cloud --all` is intentionally blocked).
 
-- `blocked_unenrolled`
-- `auth_required`
-- `cloud_config_error`
-- `policy_forbidden`
-- `paused`
-- `transport_failed`
+**Upgrade flow for existing local databases** (diagnose → repair → bootstrap → status):
 
-Cloud preflight/config errors (for example missing or invalid configured server URL) surface as `cloud_config_error`.
+```bash
+engram cloud upgrade doctor --project smoke-project        # read-only readiness check
+engram cloud upgrade repair --project smoke-project --dry-run
+engram cloud upgrade repair --project smoke-project --apply
+engram cloud upgrade bootstrap --project smoke-project     # resumable enroll + push + verify
+engram cloud upgrade status --project smoke-project        # stage/class/reason
+```
 
-Upgrade workflow notes:
+See [DOCS.md — Cloud upgrade flow](DOCS.md#cloud-upgrade-flow) for the full state machine.
 
-- `doctor` is read-only and deterministic for unchanged inputs.
-- `repair --apply` only performs deterministic local-safe fixes (no remote mutations).
-- `bootstrap --resume` is checkpointed/idempotent.
-- `rollback` fails loudly once bootstrap reaches `bootstrap_verified`.
+For authenticated mode, upgrade flow, dashboard behavior, reason codes, and full runtime/env details:
 
-Dashboard access note: compose smoke defaults to insecure local-dev mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1`) so browser access to `/dashboard` works without extra auth, and `/dashboard/login` redirects to `/dashboard/`. In authenticated mode, browser users can open `/dashboard/login`, paste the bearer token once, and continue with an HttpOnly dashboard session cookie. Protected `/dashboard/*` browser pages require that cookie (raw bearer headers are reserved for `/sync/*`). Restored browser routes include `/dashboard`, `/dashboard/stats`, `/dashboard/activity`, `/dashboard/browser` (`/observations`, `/sessions`, `/sessions/{sessionID}`, `/prompts`), `/dashboard/projects` (plus `/dashboard/projects/{project}` detail), `/dashboard/contributors` (plus `/dashboard/contributors/{contributor}`), and `/dashboard/admin` (`/projects`, `/contributors`). htmx requests return partial fragments, but direct GET/POST navigation remains fully functional without htmx.
-
-Route split reminder:
-
-- `engram serve` (local runtime): `/sync/status` and local memory JSON API.
-- `engram cloud serve` (cloud runtime): `/health`, `/sync/pull`, `/sync/push`, and `/dashboard/*`.
-
-**Background Autosync (opt-in)**: Set `ENGRAM_CLOUD_AUTOSYNC=1` together with `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` to enable continuous background replication when running `engram serve` or `engram mcp`. See [DOCS.md — Cloud Autosync](DOCS.md#cloud-autosync) for the phase table, reason codes, and troubleshooting.
-
-Runtime toggles:
-
-- `ENGRAM_DATABASE_URL` sets Postgres DSN used by `engram cloud serve`
-- `ENGRAM_PORT` sets cloud runtime port for `engram cloud serve` (default `8080`)
-- `ENGRAM_CLOUD_SYNC=1` enables cloud transport for `engram sync`
-- `ENGRAM_CLOUD_SERVER` overrides configured server URL at runtime
-- `ENGRAM_CLOUD_TOKEN` provides auth token at runtime for authenticated client sync/server auth mode
-- `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` enables local insecure cloud runtime mode (no bearer auth)
-- `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` cannot be combined with `ENGRAM_CLOUD_TOKEN`
-- `ENGRAM_CLOUD_ALLOWED_PROJECTS` is server-side only and must be set before `engram cloud serve` (or in compose env)
-- `ENGRAM_JWT_SECRET` must be explicitly set to a non-default value in authenticated cloud server mode (`ENGRAM_CLOUD_TOKEN` set)
-- `ENGRAM_CLOUD_ADMIN` optionally defines the token value that can access `/dashboard/admin` in authenticated mode only
-- `ENGRAM_CLOUD_ADMIN` is rejected when `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` (no half-working admin path in insecure browser mode)
-
-Cloud runtime bind host:
-
-- `ENGRAM_CLOUD_HOST` controls `engram cloud serve` bind host (default `127.0.0.1` for local safety)
-- For containerized runtime/compose publishing, set `ENGRAM_CLOUD_HOST=0.0.0.0`
+- [Engram Cloud docs landing](docs/engram-cloud/README.md)
+- [Engram Cloud quickstart](docs/engram-cloud/quickstart.md)
+- [DOCS.md — Cloud CLI reference](DOCS.md#cloud-cli-opt-in)
+- [DOCS.md — Cloud Autosync](DOCS.md#cloud-autosync)
 
 ## CLI Reference
 
@@ -244,7 +172,7 @@ Full CLI with all flags → [docs/ARCHITECTURE.md#cli-reference](docs/ARCHITECTU
 | Doc | Description |
 |-----|-------------|
 | [Installation](docs/INSTALLATION.md) | All install methods + platform support |
-| [Engram Cloud](docs/ENGRAM-CLOUD.md) | Cloud concepts, deploy shape, sync model, dashboard, and upgrade workflow |
+| [Engram Cloud](docs/engram-cloud/README.md) | Cloud landing page, quickstart, branding, and deep links |
 | [Agent Setup](docs/AGENT-SETUP.md) | Per-agent configuration + Memory Protocol |
 | [Architecture](docs/ARCHITECTURE.md) | How it works + MCP tools + project structure |
 | [Plugins](docs/PLUGINS.md) | OpenCode & Claude Code plugin details |
