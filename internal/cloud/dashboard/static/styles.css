@@ -610,6 +610,7 @@ form.browser-controls button[type="submit"] {
 	min-width: 8rem;
 	margin: 0;
 	padding-block: var(--pico-form-element-spacing-vertical);
+	line-height: 1.5rem;
 	justify-self: stretch;
 	align-self: start;
 }
