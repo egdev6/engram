@@ -45,9 +45,10 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 engram setup opencode
 ```
 
-This does two things:
+This does three things:
 1. Copies the plugin to `~/.config/opencode/plugins/engram.ts` (session tracking, Memory Protocol, compaction recovery)
 2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (12 agent-facing tools)
+3. Adds `opencode-subagent-statusline` to your `tui.json` or `tui.jsonc` so OpenCode shows sub-agent activity in the sidebar/home footer
 
 The plugin auto-starts the HTTP server if needed for session tracking. If your environment blocks background processes, run it manually:
 

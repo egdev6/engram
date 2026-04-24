@@ -12,6 +12,7 @@ import (
 
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
+	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
@@ -191,24 +192,52 @@ func TestPrintUsage(t *testing.T) {
 
 func TestPrintPostInstall(t *testing.T) {
 	tests := []struct {
-		agent   string
-		expects []string
+		name       string
+		result     *setup.Result
+		expects    []string
+		notExpects []string
 	}{
-		{agent: "opencode", expects: []string{"Restart OpenCode", "engram serve &"}},
-		{agent: "gemini-cli", expects: []string{"Restart Gemini CLI", "~/.gemini/settings.json"}},
-		{agent: "codex", expects: []string{"Restart Codex", "~/.codex/config.toml"}},
-		{agent: "unknown", expects: nil},
+		{
+			name:    "opencode with subagent monitor enabled",
+			result:  &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
+			expects: []string{"Restart OpenCode", "opencode-subagent-statusline", "engram serve &"},
+		},
+		{
+			name:       "opencode with subagent monitor not enabled",
+			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: false},
+			expects:    []string{"Restart OpenCode", "engram serve &"},
+			notExpects: []string{"opencode-subagent-statusline"},
+		},
+		{
+			name:    "gemini-cli",
+			result:  &setup.Result{Agent: "gemini-cli"},
+			expects: []string{"Restart Gemini CLI", "~/.gemini/settings.json"},
+		},
+		{
+			name:    "codex",
+			result:  &setup.Result{Agent: "codex"},
+			expects: []string{"Restart Codex", "~/.codex/config.toml"},
+		},
+		{
+			name:   "unknown",
+			result: &setup.Result{Agent: "unknown"},
+		},
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.agent, func(t *testing.T) {
-			stdout, stderr := captureOutput(t, func() { printPostInstall(tc.agent) })
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr := captureOutput(t, func() { printPostInstall(tc.result) })
 			if stderr != "" {
 				t.Fatalf("expected no stderr, got: %q", stderr)
 			}
 			for _, expected := range tc.expects {
 				if !strings.Contains(stdout, expected) {
 					t.Fatalf("output missing %q: %q", expected, stdout)
+				}
+			}
+			for _, forbidden := range tc.notExpects {
+				if strings.Contains(stdout, forbidden) {
+					t.Fatalf("output unexpectedly contains %q: %q", forbidden, stdout)
 				}
 			}
 			if len(tc.expects) == 0 && stdout != "" {
@@ -238,7 +267,7 @@ func TestPrintPostInstallClaudeCodeAllowlist(t *testing.T) {
 			return nil
 		}
 
-		stdout, _ := captureOutput(t, func() { printPostInstall("claude-code") })
+		stdout, _ := captureOutput(t, func() { printPostInstall(&setup.Result{Agent: "claude-code"}) })
 		if !allowlistCalled {
 			t.Fatalf("expected AddClaudeCodeAllowlist to be called")
 		}
@@ -269,7 +298,7 @@ func TestPrintPostInstallClaudeCodeAllowlist(t *testing.T) {
 			return nil
 		}
 
-		stdout, _ := captureOutput(t, func() { printPostInstall("claude-code") })
+		stdout, _ := captureOutput(t, func() { printPostInstall(&setup.Result{Agent: "claude-code"}) })
 		if allowlistCalled {
 			t.Fatalf("expected AddClaudeCodeAllowlist NOT to be called")
 		}
@@ -295,7 +324,7 @@ func TestPrintPostInstallClaudeCodeAllowlist(t *testing.T) {
 			return os.ErrPermission
 		}
 
-		_, stderr := captureOutput(t, func() { printPostInstall("claude-code") })
+		_, stderr := captureOutput(t, func() { printPostInstall(&setup.Result{Agent: "claude-code"}) })
 		if !strings.Contains(stderr, "warning") {
 			t.Fatalf("expected warning in stderr, got: %q", stderr)
 		}

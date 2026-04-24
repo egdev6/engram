@@ -2005,7 +2005,7 @@ func cmdSetup() {
 		}
 		fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 		fmt.Printf("  → %s\n", result.Destination)
-		printPostInstall(result.Agent)
+		printPostInstall(result)
 		return
 	}
 
@@ -2040,15 +2040,18 @@ func cmdSetup() {
 
 	fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 	fmt.Printf("  → %s\n", result.Destination)
-	printPostInstall(result.Agent)
+	printPostInstall(result)
 }
 
-func printPostInstall(agent string) {
-	switch agent {
+func printPostInstall(result *setup.Result) {
+	switch result.Agent {
 	case "opencode":
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart OpenCode — plugin + MCP server are ready")
 		fmt.Println("  2. Run 'engram serve &' for session tracking (HTTP API)")
+		if result.TUIPluginEnabled {
+			fmt.Println("\nAlso enabled: opencode-subagent-statusline in tui.json — sub-agent activity in the sidebar/footer.")
+		}
 	case "claude-code":
 		// Offer to add engram tools to the permissions allowlist
 		fmt.Print("\nAdd engram tools to ~/.claude/settings.json allowlist?\n")

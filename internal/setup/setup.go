@@ -41,6 +41,7 @@ var (
 	jsonMarshalFn                      = json.Marshal
 	jsonMarshalIndentFn                = json.MarshalIndent
 	injectOpenCodeMCPFn                = injectOpenCodeMCP
+	injectOpenCodeTUIPluginFn          = injectOpenCodeTUIPlugin
 	injectGeminiMCPFn                  = injectGeminiMCP
 	writeGeminiSystemPromptFn          = writeGeminiSystemPrompt
 	writeCodexMemoryInstructionFilesFn = writeCodexMemoryInstructionFiles
@@ -62,12 +63,15 @@ type Agent struct {
 
 // Result holds the outcome of an installation.
 type Result struct {
-	Agent       string
-	Destination string
-	Files       int
+	Agent            string
+	Destination      string
+	Files            int
+	TUIPluginEnabled bool
 }
 
 const claudeCodeMarketplace = "Gentleman-Programming/engram"
+
+const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
 // claudeCodeMCPTools are the MCP tool names registered by the engram plugin
 // in Claude Code. Adding these to ~/.claude/settings.json permissions.allow
@@ -313,7 +317,7 @@ func installOpenCode() (*Result, error) {
 		return nil, fmt.Errorf("write %s: %w", dest, err)
 	}
 
-	// Register engram MCP server in opencode.json
+	// Register engram MCP server in opencode.json and the subagent monitor in tui.json.
 	files := 1
 	if err := injectOpenCodeMCPFn(); err != nil {
 		// Non-fatal: plugin works, MCP just needs manual config
@@ -322,14 +326,76 @@ func installOpenCode() (*Result, error) {
 		fmt.Fprintf(os.Stderr, "  Add manually to your opencode.json under \"mcp\":\n")
 		fmt.Fprintf(os.Stderr, "  \"engram\": { \"type\": \"local\", \"command\": [%q, \"mcp\", \"--tools=agent\"], \"enabled\": true }\n", cmd)
 	} else {
-		files = 2
+		files++
+	}
+
+	tuiEnabled := false
+	if err := injectOpenCodeTUIPluginFn(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not enable subagent monitor in tui.json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  Add manually to your tui.json under \"plugin\": [%q]\n", openCodeSubagentStatuslinePlugin)
+	} else {
+		files++
+		tuiEnabled = true
 	}
 
 	return &Result{
-		Agent:       "opencode",
-		Destination: dir,
-		Files:       files,
+		Agent:            "opencode",
+		Destination:      dir,
+		Files:            files,
+		TUIPluginEnabled: tuiEnabled,
 	}, nil
+}
+
+// injectOpenCodeTUIPlugin adds the subagent monitor package to tui.json.
+// It preserves the existing config and only appends the package when missing.
+func injectOpenCodeTUIPlugin() error {
+	configPath := openCodeTUIConfigPath()
+
+	var config map[string]json.RawMessage
+	data, err := readFileFn(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			config = make(map[string]json.RawMessage)
+		} else {
+			return fmt.Errorf("read config: %w", err)
+		}
+	} else {
+		cleaned := stripJSONC(data)
+		if err := json.Unmarshal(cleaned, &config); err != nil {
+			return fmt.Errorf("parse config: %w", err)
+		}
+	}
+
+	var plugins []string
+	if raw, exists := config["plugin"]; exists {
+		if err := json.Unmarshal(raw, &plugins); err != nil {
+			return fmt.Errorf("parse plugin block: %w", err)
+		}
+	}
+
+	for _, plugin := range plugins {
+		if plugin == openCodeSubagentStatuslinePlugin {
+			return nil
+		}
+	}
+
+	plugins = append(plugins, openCodeSubagentStatuslinePlugin)
+	pluginsJSON, err := jsonMarshalFn(plugins)
+	if err != nil {
+		return fmt.Errorf("marshal plugin block: %w", err)
+	}
+	config["plugin"] = json.RawMessage(pluginsJSON)
+
+	output, err := jsonMarshalIndentFn(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	if err := writeFileFn(configPath, output, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+
+	return nil
 }
 
 // injectOpenCodeMCP adds the engram MCP server entry to opencode.json.
@@ -412,6 +478,17 @@ func openCodeConfigPath() string {
 		return jsonc
 	}
 	return filepath.Join(dir, "opencode.json")
+}
+
+// openCodeTUIConfigPath returns the path to the OpenCode TUI config file.
+// It checks for tui.jsonc first, then falls back to tui.json.
+func openCodeTUIConfigPath() string {
+	dir := openCodeConfigDir()
+	jsonc := filepath.Join(dir, "tui.jsonc")
+	if _, err := statFn(jsonc); err == nil {
+		return jsonc
+	}
+	return filepath.Join(dir, "tui.json")
 }
 
 // openCodeConfigDir returns the directory containing the OpenCode config.

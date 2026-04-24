@@ -37,6 +37,7 @@ The plugin:
 - **Injects previous session context** into the compaction prompt
 - **Instructs the compressor** to tell the new agent to persist the compacted summary via `mem_session_summary`
 - **Strips `<private>` tags** before sending data
+- **Enables** `opencode-subagent-statusline` in `tui.json` or `tui.jsonc` during `engram setup opencode`, adding a live sub-agent monitor to OpenCode's sidebar/home footer. To disable it later, remove `"opencode-subagent-statusline"` from the `"plugin"` array in your TUI config and restart OpenCode.
 
 **No raw tool call recording** — the agent handles all memory via `mem_save` and `mem_session_summary`.
 
