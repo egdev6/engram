@@ -110,6 +110,10 @@ type dashboardReadModel struct {
 }
 
 func buildDashboardReadModel(chunks []dashboardChunkRow) (dashboardReadModel, error) {
+	return buildDashboardReadModelFromRows(chunks, nil)
+}
+
+func buildDashboardReadModelFromRows(chunks []dashboardChunkRow, mutationRows []dashboardMutationRow) (dashboardReadModel, error) {
 	ordered := append([]dashboardChunkRow(nil), chunks...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		if !ordered[i].createdAt.Equal(ordered[j].createdAt) {
@@ -227,6 +231,37 @@ func buildDashboardReadModel(chunks []dashboardChunkRow) (dashboardReadModel, er
 			if chunk.createdAt.After(parseRFC3339(projectContributors[project][creator].LastChunkAt)) {
 				projectContributors[project][creator].LastChunkAt = chunk.createdAt.UTC().Format(time.RFC3339)
 			}
+		}
+	}
+
+	orderedMutations := append([]dashboardMutationRow(nil), mutationRows...)
+	sort.SliceStable(orderedMutations, func(i, j int) bool {
+		if orderedMutations[i].seq != orderedMutations[j].seq {
+			return orderedMutations[i].seq < orderedMutations[j].seq
+		}
+		if !orderedMutations[i].occurredAt.Equal(orderedMutations[j].occurredAt) {
+			return orderedMutations[i].occurredAt.Before(orderedMutations[j].occurredAt)
+		}
+		if orderedMutations[i].project != orderedMutations[j].project {
+			return orderedMutations[i].project < orderedMutations[j].project
+		}
+		if orderedMutations[i].entity != orderedMutations[j].entity {
+			return orderedMutations[i].entity < orderedMutations[j].entity
+		}
+		return orderedMutations[i].entityKey < orderedMutations[j].entityKey
+	})
+	for _, mutationRow := range orderedMutations {
+		mutation := store.SyncMutation{
+			Seq:        mutationRow.seq,
+			Entity:     mutationRow.entity,
+			EntityKey:  mutationRow.entityKey,
+			Op:         mutationRow.op,
+			Payload:    strings.TrimSpace(string(mutationRow.payload)),
+			Project:    mutationRow.project,
+			OccurredAt: mutationRow.occurredAt.UTC().Format(time.RFC3339),
+		}
+		if err := applyDashboardMutation(mutationRow.project, mutation, sessions, observations, prompts); err != nil {
+			return dashboardReadModel{}, fmt.Errorf("cloudstore: invalid dashboard mutation payload in cloud_mutations seq %d: %w", mutationRow.seq, err)
 		}
 	}
 
@@ -793,7 +828,11 @@ func (cs *CloudStore) buildDashboardReadModel() (dashboardReadModel, error) {
 	if err != nil {
 		return dashboardReadModel{}, err
 	}
-	model, err := buildDashboardReadModel(chunks)
+	mutations, err := cs.loadMutationRows("")
+	if err != nil {
+		return dashboardReadModel{}, err
+	}
+	model, err := buildDashboardReadModelFromRows(chunks, mutations)
 	if err != nil {
 		return dashboardReadModel{}, err
 	}
@@ -942,6 +981,16 @@ type dashboardChunkRow struct {
 	parsed    engramsync.ChunkData
 }
 
+type dashboardMutationRow struct {
+	seq        int64
+	project    string
+	entity     string
+	entityKey  string
+	op         string
+	payload    []byte
+	occurredAt time.Time
+}
+
 func (cs *CloudStore) loadChunkRows(project string) ([]dashboardChunkRow, error) {
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
@@ -995,6 +1044,65 @@ func (cs *CloudStore) loadChunkRows(project string) ([]dashboardChunkRow, error)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("cloudstore: dashboard iterate chunks: %w", err)
+	}
+	return result, nil
+}
+
+func (cs *CloudStore) loadMutationRows(project string) ([]dashboardMutationRow, error) {
+	if cs == nil || cs.db == nil {
+		return nil, fmt.Errorf("cloudstore: not initialized")
+	}
+	project = strings.TrimSpace(project)
+	query := `SELECT seq, project, entity, entity_key, op, payload::text, occurred_at FROM cloud_mutations`
+	args := []any{}
+	if project == "" && len(cs.dashboardAllowedScopes) > 0 {
+		allowed := make([]string, 0, len(cs.dashboardAllowedScopes))
+		for name := range cs.dashboardAllowedScopes {
+			allowed = append(allowed, name)
+		}
+		sort.Strings(allowed)
+		query += ` WHERE project = ANY($1)`
+		args = append(args, allowed)
+	}
+	if project != "" {
+		if len(cs.dashboardAllowedScopes) > 0 {
+			if _, ok := cs.dashboardAllowedScopes[project]; !ok {
+				return []dashboardMutationRow{}, nil
+			}
+		}
+		if len(args) > 0 {
+			return nil, fmt.Errorf("cloudstore: internal dashboard mutation query invariant violated")
+		}
+		query += ` WHERE project = $1`
+		args = append(args, project)
+	}
+	query += ` ORDER BY seq ASC, occurred_at ASC`
+	rows, err := cs.db.QueryContext(context.Background(), query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("cloudstore: dashboard query mutations: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]dashboardMutationRow, 0)
+	for rows.Next() {
+		var row dashboardMutationRow
+		var payloadText string
+		if err := rows.Scan(&row.seq, &row.project, &row.entity, &row.entityKey, &row.op, &payloadText, &row.occurredAt); err != nil {
+			return nil, fmt.Errorf("cloudstore: dashboard scan mutation row: %w", err)
+		}
+		row.project = strings.TrimSpace(row.project)
+		row.entity = strings.TrimSpace(row.entity)
+		row.entityKey = strings.TrimSpace(row.entityKey)
+		row.op = strings.TrimSpace(row.op)
+		row.payload = []byte(strings.TrimSpace(payloadText))
+		row.occurredAt = row.occurredAt.UTC()
+		if len(row.payload) == 0 {
+			row.payload = []byte(`{}`)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cloudstore: dashboard iterate mutations: %w", err)
 	}
 	return result, nil
 }

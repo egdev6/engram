@@ -1135,6 +1135,98 @@ func TestPromptMutationPreservesSessionIDAndCreatedAt(t *testing.T) {
 	}
 }
 
+// TestStandaloneCloudMutationObservationVisibleInPaginatedList verifies the regression
+// where an observation that exists only in cloud_mutations (and not cloud_chunks)
+// must still appear in dashboard observation list/search.
+func TestStandaloneCloudMutationObservationVisibleInPaginatedList(t *testing.T) {
+	payloadBytes, err := json.Marshal(map[string]any{
+		"sync_id":    "obs-ab76f3e44c24859e",
+		"session_id": "sess-standalone",
+		"project":    "engram",
+		"type":       "decision",
+		"title":      "Test de decisión arquitectónica ignorar",
+		"content":    "contenido",
+		"created_at": "2026-04-26T09:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal mutation payload: %v", err)
+	}
+
+	model, err := buildDashboardReadModelFromRows(nil, []dashboardMutationRow{
+		{
+			seq:        726,
+			project:    "engram",
+			entity:     "observation",
+			entityKey:  "obs-ab76f3e44c24859e",
+			op:         "upsert",
+			payload:    payloadBytes,
+			occurredAt: time.Date(2026, 4, 26, 9, 0, 0, 0, time.UTC),
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+
+	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil }}
+	rows, total, err := cs.ListRecentObservationsPaginated("engram", "decisión arquitectónica", "", 20, 0)
+	if err != nil {
+		t.Fatalf("ListRecentObservationsPaginated: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("expected total=1, got %d", total)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 paginated row, got %d", len(rows))
+	}
+	if rows[0].SyncID != "obs-ab76f3e44c24859e" {
+		t.Fatalf("expected sync_id obs-ab76f3e44c24859e, got %q", rows[0].SyncID)
+	}
+	if rows[0].Title != "Test de decisión arquitectónica ignorar" {
+		t.Fatalf("expected standalone mutation title preserved, got %q", rows[0].Title)
+	}
+}
+
+// TestStandaloneCloudMutationDeleteWinsBySeq ensures standalone delete mutations
+// are applied in sequence order and can remove previously upserted entities.
+func TestStandaloneCloudMutationDeleteWinsBySeq(t *testing.T) {
+	upsertPayload, err := json.Marshal(map[string]any{
+		"sync_id":    "obs-delete-seq",
+		"session_id": "sess-delete-seq",
+		"project":    "engram",
+		"type":       "bugfix",
+		"title":      "Will be deleted",
+		"created_at": "2026-04-26T08:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal upsert payload: %v", err)
+	}
+	deletePayload, err := json.Marshal(map[string]any{
+		"sync_id":    "obs-delete-seq",
+		"session_id": "sess-delete-seq",
+		"deleted":    true,
+	})
+	if err != nil {
+		t.Fatalf("marshal delete payload: %v", err)
+	}
+
+	model, err := buildDashboardReadModelFromRows(nil, []dashboardMutationRow{
+		{seq: 100, project: "engram", entity: "observation", entityKey: "obs-delete-seq", op: "upsert", payload: upsertPayload, occurredAt: time.Date(2026, 4, 26, 8, 0, 0, 0, time.UTC)},
+		{seq: 101, project: "engram", entity: "observation", entityKey: "obs-delete-seq", op: "delete", payload: deletePayload, occurredAt: time.Date(2026, 4, 26, 8, 1, 0, 0, time.UTC)},
+	})
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+
+	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil }}
+	rows, total, err := cs.ListRecentObservationsPaginated("engram", "", "", 20, 0)
+	if err != nil {
+		t.Fatalf("ListRecentObservationsPaginated: %v", err)
+	}
+	if total != 0 || len(rows) != 0 {
+		t.Fatalf("expected deleted observation to be absent, total=%d len=%d", total, len(rows))
+	}
+}
+
 // ─── R5-4: Dedicated not-found error sentinels ───────────────────────────────
 
 // TestSessionDetailNotFoundReturnsSessionNotFoundError asserts that
