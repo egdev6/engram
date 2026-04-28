@@ -126,6 +126,7 @@ engram sync --cloud --project smoke-project
 
 Cloud mode is always project-scoped (`--project` is required; `engram sync --cloud --all` is intentionally blocked).
 Known repairable cloud sync/upsert/canonicalization failures keep the original error visible and recommend the explicit `doctor`/`repair` flow below; Engram never auto-applies repair from sync or autosync.
+For blocked cloud sync, `transport_failed`, or legacy session directory repair, see [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md).
 
 **After upgrading `engram` while an MCP client is already running:**
 
