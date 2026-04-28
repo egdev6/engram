@@ -9,8 +9,9 @@
 # It is intentionally conservative: dry-run is the default, `--apply` creates a
 # timestamped SQLite backup per applied blocker, loop mode requires `--apply`,
 # and it never touches `last_acked_seq` or deletes sync mutations. It can also
-# repair local `sessions.directory` rows left empty by legacy data after doctor
-# reports ready, because those rows can still be included in a final push chunk.
+# repair local `sessions.directory` and `observations` rows left incomplete by
+# legacy data after doctor reports ready, because those rows can still be
+# included in a final push chunk.
 # Prefer the
 # built-in `engram cloud upgrade repair` flow when it can infer the directory on
 # its own; use this only for the manual rescue case.
@@ -19,7 +20,7 @@ set -eu
 
 usage() {
   cat <<'USAGE'
-Usage: repair-missing-session-directory.sh [--apply] [--interactive] [--all] [--fix-empty-sessions] [--max N] [--seq N] PROJECT [DIRECTORY]
+Usage: repair-missing-session-directory.sh [--apply] [--interactive] [--all] [--fix-empty-sessions] [--fix-empty-observations] [--fix-exported] [--max N] [--seq N] PROJECT [DIRECTORY]
 
 Safely patch one legacy sync mutation payload:
   - session upsert missing `directory`
@@ -38,12 +39,19 @@ Flags:
   --all       Apply supported blockers one at a time, rerunning doctor after each
                repair until no supported session/observation upsert blocker remains.
                Requires --apply; when doctor reports ready, also repairs local
-               sessions for PROJECT whose directory is empty/null.
+               sessions for PROJECT whose directory is empty/null, then repairs
+               exported observations for PROJECT with missing required fields.
                Use a one-shot dry-run first to preview changes.
   --fix-empty-sessions
                When doctor has no supported mutation blocker, repair local
                sessions for PROJECT whose directory is empty/null. Does not
                modify sync_mutations or last_acked_seq.
+  --fix-empty-observations
+               Bypass doctor parsing and scan/repair local observations in the
+               PROJECT export scope whose cloud-push required fields are empty.
+               Does not modify sync_mutations or last_acked_seq.
+  --fix-exported
+               Shortcut for --fix-empty-sessions --fix-empty-observations.
   --max N     Maximum --all iterations before stopping. Defaults to 20.
   --seq N     Use a known sync_mutations.seq instead of parsing doctor output.
   -h, --help  Show this help.
@@ -195,6 +203,7 @@ APPLY=0
 INTERACTIVE=0
 ALL=0
 FIX_EMPTY_SESSIONS=0
+FIX_EMPTY_OBSERVATIONS=0
 MAX_ITERATIONS=20
 SEQ=""
 ENTITY=""
@@ -215,6 +224,15 @@ while [ "$#" -gt 0 ]; do
       ;;
     --fix-empty-sessions)
       FIX_EMPTY_SESSIONS=1
+      shift
+      ;;
+    --fix-empty-observations)
+      FIX_EMPTY_OBSERVATIONS=1
+      shift
+      ;;
+    --fix-exported)
+      FIX_EMPTY_SESSIONS=1
+      FIX_EMPTY_OBSERVATIONS=1
       shift
       ;;
     --max)
@@ -369,9 +387,189 @@ COMMIT;"
   return 0
 }
 
+observation_export_scope_predicate() {
+  PROJECT_SQL=$(sql_escape "$PROJECT")
+  predicate="(ifnull(observations.project, '') = '$PROJECT_SQL'"
+
+  if have_table sessions; then
+    predicate="$predicate OR (ifnull(observations.project, '') = '' AND observations.session_id IN (SELECT id FROM sessions WHERE ifnull(project, '') = '$PROJECT_SQL'))"
+  fi
+
+  printf '%s\n' "$predicate)"
+}
+
+observation_missing_predicate() {
+  printf '%s\n' "(
+    ifnull(sync_id, '') = '' OR
+    ifnull(session_id, '') = '' OR
+    ifnull(type, '') = '' OR
+    ifnull(title, '') = '' OR
+    ifnull(content, '') = '' OR
+    ifnull(scope, '') = ''
+  )"
+}
+
+observation_missing_fields_sql() {
+  printf '%s' "rtrim(
+    CASE WHEN ifnull(sync_id, '') = '' THEN 'sync_id,' ELSE '' END ||
+    CASE WHEN ifnull(session_id, '') = '' THEN 'session_id,' ELSE '' END ||
+    CASE WHEN ifnull(type, '') = '' THEN 'type,' ELSE '' END ||
+    CASE WHEN ifnull(title, '') = '' THEN 'title,' ELSE '' END ||
+    CASE WHEN ifnull(content, '') = '' THEN 'content,' ELSE '' END ||
+    CASE WHEN ifnull(scope, '') = '' THEN 'scope,' ELSE '' END,
+    ','
+  )"
+}
+
+observation_inferred_title_sql() {
+  printf '%s' "substr(trim(replace(replace(replace(content, char(13), ' '), char(10), ' '), char(9), ' ')), 1, 120)"
+}
+
+empty_observation_count() {
+  if ! have_table observations; then
+    printf '0\n'
+    return 0
+  fi
+  scope_predicate=$(observation_export_scope_predicate)
+  missing_predicate=$(observation_missing_predicate)
+  sqlite_scalar "SELECT COUNT(*) FROM observations WHERE $scope_predicate AND $missing_predicate;"
+}
+
+preview_empty_observations() {
+  scope_predicate=$(observation_export_scope_predicate)
+  missing_predicate=$(observation_missing_predicate)
+  missing_fields=$(observation_missing_fields_sql)
+
+  info "Affected local observations:"
+  sqlite_box "SELECT id, ifnull(sync_id, '') AS sync_id, ifnull(session_id, '') AS session_id, ifnull(project, '') AS project, ifnull(type, '') AS type, ifnull(title, '') AS title, ifnull(scope, '') AS scope, $missing_fields AS missing_fields FROM observations WHERE $scope_predicate AND $missing_predicate ORDER BY id;" || true
+}
+
+blocking_observation_count() {
+  scope_predicate=$(observation_export_scope_predicate)
+  missing_predicate=$(observation_missing_predicate)
+  sqlite_scalar "SELECT COUNT(*) FROM observations WHERE $scope_predicate AND $missing_predicate AND (
+    ifnull(session_id, '') = '' OR
+    ifnull(content, '') = '' OR
+    (ifnull(title, '') = '' AND ifnull(content, '') = '') OR
+    (ifnull(sync_id, '') = '' AND ifnull(id, '') = '')
+  );"
+}
+
+preview_blocking_observations() {
+  scope_predicate=$(observation_export_scope_predicate)
+  missing_predicate=$(observation_missing_predicate)
+  missing_fields=$(observation_missing_fields_sql)
+
+  info "Blocked local observations needing human input:"
+  sqlite_box "SELECT id, ifnull(sync_id, '') AS sync_id, ifnull(session_id, '') AS session_id, ifnull(project, '') AS project, ifnull(type, '') AS type, ifnull(title, '') AS title, ifnull(scope, '') AS scope, $missing_fields AS missing_fields FROM observations WHERE $scope_predicate AND $missing_predicate AND (
+    ifnull(session_id, '') = '' OR
+    ifnull(content, '') = '' OR
+    (ifnull(title, '') = '' AND ifnull(content, '') = '') OR
+    (ifnull(sync_id, '') = '' AND ifnull(id, '') = '')
+  ) ORDER BY id;" || true
+}
+
+prompt_empty_observations() {
+  scope_predicate=$(observation_export_scope_predicate)
+  missing_predicate=$(observation_missing_predicate)
+
+  sqlite3 -batch -noheader -separator '|' "$DB" "SELECT id FROM observations WHERE $scope_predicate AND $missing_predicate AND (ifnull(content, '') = '' OR (ifnull(title, '') = '' AND ifnull(content, '') = '')) ORDER BY id;" |
+  while IFS='|' read -r observation_id; do
+    [ "$observation_id" ] || continue
+    OBS_ID_SQL=$(sql_escape "$observation_id")
+    current_content=$(sqlite_scalar "SELECT ifnull(content, '') FROM observations WHERE id = CAST('$OBS_ID_SQL' AS INTEGER);")
+    current_title=$(sqlite_scalar "SELECT ifnull(title, '') FROM observations WHERE id = CAST('$OBS_ID_SQL' AS INTEGER);")
+    current_sync_id=$(sqlite_scalar "SELECT ifnull(sync_id, '') FROM observations WHERE id = CAST('$OBS_ID_SQL' AS INTEGER);")
+    current_session_id=$(sqlite_scalar "SELECT ifnull(session_id, '') FROM observations WHERE id = CAST('$OBS_ID_SQL' AS INTEGER);")
+
+    info "Manual local observation completion needed"
+    info "-----------------------------------------"
+    info "Observation id: $observation_id"
+    info "sync_id: ${current_sync_id:-<missing>}"
+    info "session_id: ${current_session_id:-<missing>}"
+
+    if [ ! "$current_content" ]; then
+      current_content=$(prompt_value "content" "content" "" 1)
+      CURRENT_CONTENT_SQL=$(sql_escape "$current_content")
+      sqlite3 -batch "$DB" "UPDATE observations SET content = '$CURRENT_CONTENT_SQL' WHERE id = CAST('$OBS_ID_SQL' AS INTEGER) AND ifnull(content, '') = '';"
+    fi
+
+    if [ ! "$current_title" ]; then
+      title_default=$(single_line_excerpt "$current_content" | cut -c 1-120)
+      current_title=$(prompt_value "title" "title" "$title_default" 1)
+      CURRENT_TITLE_SQL=$(sql_escape "$current_title")
+      sqlite3 -batch "$DB" "UPDATE observations SET title = '$CURRENT_TITLE_SQL' WHERE id = CAST('$OBS_ID_SQL' AS INTEGER) AND ifnull(title, '') = '';"
+    fi
+  done
+}
+
+repair_empty_observations() {
+  have_table observations || die "observations table not found in DB: $DB"
+  missing_count=$(empty_observation_count)
+
+  if [ "$missing_count" = "0" ]; then
+    info "No local observations in project export scope with missing required fields found for project '$PROJECT'."
+    return 0
+  fi
+
+  info "Preview"
+  info "-------"
+  info "DB path: $DB"
+  info "Project: $PROJECT"
+  info "Repair: local observations required-field fallback"
+  info "Rows missing required fields: $missing_count"
+  info ""
+  preview_empty_observations
+
+  if [ "$APPLY" -ne 1 ]; then
+    info ""
+    info "Dry-run only: no database changes were made. Re-run with --apply --fix-empty-observations, --apply --fix-exported, or --apply --all to write."
+    return 0
+  fi
+
+  backup="$DB.repair-empty-observations.$PROJECT.$(date +%Y%m%d%H%M%S).bak"
+  cp "$DB" "$backup"
+  info ""
+  info "Backup created: $backup"
+
+  if [ "$INTERACTIVE" -eq 1 ]; then
+    prompt_empty_observations
+  fi
+
+  blocker_count=$(blocking_observation_count)
+  if [ "$blocker_count" != "0" ]; then
+    preview_blocking_observations
+    die "blocked: $blocker_count exported observation row(s) still need non-inferable required fields; session_id is never invented, and empty content/title require --interactive input"
+  fi
+
+  scope_predicate=$(observation_export_scope_predicate)
+  missing_predicate=$(observation_missing_predicate)
+  inferred_title=$(observation_inferred_title_sql)
+
+  sqlite3 -batch "$DB" "BEGIN;
+UPDATE observations
+SET sync_id = CASE WHEN ifnull(sync_id, '') = '' AND ifnull(id, '') != '' THEN CAST(id AS TEXT) ELSE sync_id END,
+    type = CASE WHEN ifnull(type, '') = '' THEN 'manual' ELSE type END,
+    title = CASE WHEN ifnull(title, '') = '' AND ifnull(content, '') != '' THEN $inferred_title ELSE title END,
+    scope = CASE WHEN ifnull(scope, '') = '' THEN 'project' ELSE scope END
+WHERE $scope_predicate
+  AND $missing_predicate;
+COMMIT;"
+
+  remaining_count=$(empty_observation_count)
+  if [ "$remaining_count" != "0" ]; then
+    preview_empty_observations
+    die "verification failed: $remaining_count exported observation row(s) still have missing required fields for project '$PROJECT'"
+  fi
+
+  info "Apply complete: local observation required fields verified for $missing_count row(s)."
+  return 0
+}
+
 handle_no_supported_blocker() {
   context=$1
   missing_count=$(empty_session_count)
+  missing_observation_count=$(empty_observation_count)
 
   if [ "$missing_count" != "0" ]; then
     info "No supported sync_mutations blocker found, but $missing_count local session row(s) in project export scope for '$PROJECT' have empty/null directory."
@@ -383,21 +581,35 @@ handle_no_supported_blocker() {
     return 2
   fi
 
+  if [ "$missing_observation_count" != "0" ]; then
+    info "No supported sync_mutations blocker found, but $missing_observation_count local observation row(s) in project export scope for '$PROJECT' have missing required fields."
+    if [ "$FIX_EMPTY_OBSERVATIONS" -eq 1 ] || [ "$ALL" -eq 1 ]; then
+      repair_empty_observations
+      return 0
+    fi
+    info "Rerun with --fix-empty-observations for a dry-run preview, then --apply --fix-empty-observations or --apply --all to write."
+    return 2
+  fi
+
   info "No supported session/observation upsert blocker found."
   if [ "$FIX_EMPTY_SESSIONS" -eq 1 ]; then
     info "No local sessions in project export scope with empty/null directory found for project '$PROJECT'."
+  fi
+  if [ "$FIX_EMPTY_OBSERVATIONS" -eq 1 ]; then
+    info "No local observations in project export scope with missing required fields found for project '$PROJECT'."
   fi
   [ "$context" = "loop" ] && info "Loop mode complete."
   return 1
 }
 
-if [ ! "$SEQ" ] || [ "$ALL" -eq 1 ]; then
-  require_cmd engram
+if [ "$ALL" -ne 1 ] && [ ! "$SEQ" ] && { [ "$FIX_EMPTY_SESSIONS" -eq 1 ] || [ "$FIX_EMPTY_OBSERVATIONS" -eq 1 ]; }; then
+  [ "$FIX_EMPTY_SESSIONS" -eq 1 ] && repair_empty_sessions
+  [ "$FIX_EMPTY_OBSERVATIONS" -eq 1 ] && repair_empty_observations
+  exit 0
 fi
 
-if [ "$FIX_EMPTY_SESSIONS" -eq 1 ] && [ "$ALL" -ne 1 ] && [ ! "$SEQ" ]; then
-  repair_empty_sessions
-  exit 0
+if [ ! "$SEQ" ] || [ "$ALL" -eq 1 ]; then
+  require_cmd engram
 fi
 
 if [ ! "$SEQ" ] && [ "$ALL" -ne 1 ]; then
@@ -410,6 +622,7 @@ if [ ! "$SEQ" ] && [ "$ALL" -ne 1 ]; then
     else
       no_blocker_rc=$?
       [ "$no_blocker_rc" = "2" ] && exit 1
+      [ "$no_blocker_rc" = "1" ] && exit 0
     fi
     die "could not parse 'seq=N entity=session op=upsert' or 'seq=N entity=observation op=upsert' from doctor output; rerun with --seq N"
   fi
