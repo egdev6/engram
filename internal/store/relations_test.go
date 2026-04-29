@@ -94,6 +94,58 @@ func TestFindCandidates_HappyPath(t *testing.T) {
 	}
 }
 
+// TestFindCandidates_EarlyBreakDoesNotSelfBlockWithSingleConnection verifies
+// that FindCandidates closes its FTS rows before follow-up QueryRow/Exec calls.
+// With SetMaxOpenConns(1), leaving rows open after the early-break path can
+// self-block forever while creating pending relation rows.
+func TestFindCandidates_EarlyBreakDoesNotSelfBlockWithSingleConnection(t *testing.T) {
+	s := setupRelationsStore(t)
+
+	for i := 0; i < 6; i++ {
+		_, _ = addTestObs(t, s, "JWT auth token session migration pattern", "decision", "testproject", "project")
+	}
+	savedID, _ := addTestObs(t, s, "JWT auth token session migration rollout", "decision", "testproject", "project")
+
+	type findResult struct {
+		candidates []Candidate
+		err        error
+	}
+	done := make(chan findResult, 1)
+	go func() {
+		candidates, err := s.FindCandidates(savedID, CandidateOptions{
+			Project:   "testproject",
+			Scope:     "project",
+			Limit:     1,
+			BM25Floor: ptrFloat64(-10.0),
+		})
+		done <- findResult{candidates: candidates, err: err}
+	}()
+
+	var result findResult
+	select {
+	case result = <-done:
+		// Expected: FindCandidates should complete under the single-connection pool.
+	case <-time.After(2 * time.Second):
+		// Unblock the goroutine before failing so cleanup can close the store.
+		s.db.SetMaxOpenConns(2)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		t.Fatal("FindCandidates self-blocked after early break with SetMaxOpenConns(1)")
+	}
+
+	if result.err != nil {
+		t.Fatalf("FindCandidates: %v", result.err)
+	}
+	if len(result.candidates) != 1 {
+		t.Fatalf("expected exactly 1 candidate from limit=1, got %d", len(result.candidates))
+	}
+	if result.candidates[0].JudgmentID == "" {
+		t.Fatal("expected relation insert to populate candidate JudgmentID")
+	}
+}
+
 // hasPrefix is a simple helper to avoid importing strings in test.
 func hasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix

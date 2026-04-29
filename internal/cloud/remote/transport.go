@@ -48,6 +48,10 @@ func (e *HTTPStatusError) IsRepairableMigrationFailure() bool {
 	return e != nil && strings.TrimSpace(strings.ToLower(e.ErrorClass)) == "repairable"
 }
 
+func (e *HTTPStatusError) IsRepairable() bool {
+	return e.IsRepairableMigrationFailure()
+}
+
 func newHTTPStatusError(operation string, statusCode int, body []byte) error {
 	errorClass := ""
 	errorCode := ""

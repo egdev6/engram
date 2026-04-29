@@ -377,8 +377,6 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	if err != nil {
 		return nil, fmt.Errorf("FindCandidates: FTS5 query: %w", err)
 	}
-	defer rows.Close()
-
 	type rawCandidate struct {
 		id       int64
 		syncID   string
@@ -392,6 +390,9 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	for rows.Next() {
 		var rc rawCandidate
 		if err := rows.Scan(&rc.id, &rc.syncID, &rc.title, &rc.obsType, &rc.topicKey, &rc.score); err != nil {
+			if closeErr := rows.Close(); closeErr != nil {
+				return nil, fmt.Errorf("FindCandidates: scan: %w; close rows: %v", err, closeErr)
+			}
 			return nil, fmt.Errorf("FindCandidates: scan: %w", err)
 		}
 		// Apply BM25 floor filter. BM25 scores are negative; closer to 0 = better.
@@ -405,7 +406,13 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		}
 	}
 	if err := rows.Err(); err != nil {
+		if closeErr := rows.Close(); closeErr != nil {
+			return nil, fmt.Errorf("FindCandidates: rows error: %w; close rows: %v", err, closeErr)
+		}
 		return nil, fmt.Errorf("FindCandidates: rows error: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("FindCandidates: close rows: %w", err)
 	}
 
 	if len(raw) == 0 {

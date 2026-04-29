@@ -81,6 +81,9 @@ func TestReadManifestParsesMachineActionableErrorPayload(t *testing.T) {
 	if !statusErr.IsRepairableMigrationFailure() {
 		t.Fatalf("expected IsRepairableMigrationFailure=true, got false")
 	}
+	if !statusErr.IsRepairable() {
+		t.Fatalf("expected IsRepairable=true, got false")
+	}
 	if !strings.Contains(statusErr.Error(), "sessions[0].directory is required") {
 		t.Fatalf("expected error message to preserve actionable detail, got %q", statusErr.Error())
 	}

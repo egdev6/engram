@@ -238,6 +238,8 @@ func shouldRegister(name string, allowlist map[string]bool) bool {
 }
 
 func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) {
+	writeQueue := newWriteQueue(defaultMCPWriteQueueSize)
+
 	// ─── mem_search (profile: agent, core — always in context) ─────────
 	if shouldRegister("mem_search", allowlist) {
 		srv.AddTool(
@@ -325,7 +327,7 @@ Examples:
 					mcp.Description("Optional topic identifier for upserts (e.g. architecture/auth-model). Reuses and updates the latest observation in same project+scope."),
 				),
 			),
-			handleSave(s, cfg, activity),
+			queuedWriteHandler(writeQueue, handleSave(s, cfg, activity)),
 		)
 	}
 
@@ -360,7 +362,7 @@ Examples:
 					mcp.Description("New topic key (normalized internally)"),
 				),
 			),
-			handleUpdate(s),
+			queuedWriteHandler(writeQueue, handleUpdate(s)),
 		)
 	}
 
@@ -408,7 +410,7 @@ Examples:
 					mcp.Description("If true, permanently deletes the observation"),
 				),
 			),
-			handleDelete(s),
+			queuedWriteHandler(writeQueue, handleDelete(s)),
 		)
 	}
 
@@ -430,7 +432,7 @@ Examples:
 					mcp.Description("Session ID to associate with (default: manual-save-{project})"),
 				),
 			),
-			handleSavePrompt(s, cfg),
+			queuedWriteHandler(writeQueue, handleSavePrompt(s, cfg)),
 		)
 	}
 
@@ -571,7 +573,7 @@ GUIDELINES:
 				),
 				// project field intentionally omitted — auto-detect only (REQ-308 write-tool contract)
 			),
-			handleSessionSummary(s, cfg, activity),
+			queuedWriteHandler(writeQueue, handleSessionSummary(s, cfg, activity)),
 		)
 	}
 
@@ -594,7 +596,7 @@ GUIDELINES:
 					mcp.Description("Working directory"),
 				),
 			),
-			handleSessionStart(s, cfg, activity),
+			queuedWriteHandler(writeQueue, handleSessionStart(s, cfg, activity)),
 		)
 	}
 
@@ -617,7 +619,7 @@ GUIDELINES:
 					mcp.Description("Summary of what was accomplished"),
 				),
 			),
-			handleSessionEnd(s, cfg, activity),
+			queuedWriteHandler(writeQueue, handleSessionEnd(s, cfg, activity)),
 		)
 	}
 
@@ -647,7 +649,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
 				),
 			),
-			handleCapturePassive(s, cfg, activity),
+			queuedWriteHandler(writeQueue, handleCapturePassive(s, cfg, activity)),
 		)
 	}
 
@@ -671,7 +673,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("The canonical project name to merge INTO (e.g. 'engram')"),
 				),
 			),
-			handleMergeProjects(s),
+			queuedWriteHandler(writeQueue, handleMergeProjects(s)),
 		)
 	}
 
@@ -740,7 +742,7 @@ Re-judging an already-judged ID overwrites the verdict (deliberate revision).`),
 					mcp.Description("Session ID for provenance (default: auto)"),
 				),
 			),
-			handleJudge(s, activity),
+			queuedWriteHandler(writeQueue, handleJudge(s, activity)),
 		)
 	}
 

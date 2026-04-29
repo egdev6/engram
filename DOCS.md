@@ -432,6 +432,17 @@ engram sync --cloud --project my-project
 ENGRAM_CLOUD_SYNC=1 engram sync --status --project my-project
 ```
 
+When `engram sync --cloud --project <project>` or autosync hits a known repairable cloud sync/upsert/canonicalization failure, Engram preserves the original error and appends guidance to run:
+
+```bash
+engram cloud upgrade doctor --project <project>
+engram cloud upgrade repair --project <project> --dry-run
+engram cloud upgrade repair --project <project> --apply
+engram sync --cloud --project <project>
+```
+
+Sync/autosync never auto-applies repairs; only the explicit `repair --apply` command mutates local repairable upgrade state.
+
 ### Local Cloud Bring-Up (Docker + Postgres)
 
 ```bash
@@ -1078,6 +1089,8 @@ Missing `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_SERVER` logs an `ERROR` and disabl
 Note: when the cloud server returns 404 on mutation endpoints, the transport logs `[autosync] cloud mutation endpoint returned 404 (server_unsupported)` and the transport-level `ErrorCode` is `"server_unsupported"`, but the manager surfaces this as `reason_code: transport_failed`.
 
 ### Troubleshooting
+
+For a step-by-step recovery guide covering `chunk_id does not match payload content hash`, `session payload directory is required`, and the temporary missing-directory repair helper, see [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md).
 
 **`transport_failed` with `server_unsupported` in logs**: The cloud server does not yet implement `POST /sync/mutations/push` or `GET /sync/mutations/pull`. Deploy a server version that includes these endpoints before enabling `ENGRAM_CLOUD_AUTOSYNC=1`. Check logs for the line containing `server_unsupported`.
 

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
@@ -78,17 +79,26 @@ type PullMutationsResponse struct {
 type LocalStore interface {
 	GetSyncState(targetKey string) (*store.SyncState, error)
 	ListPendingSyncMutations(targetKey string, limit int) ([]store.SyncMutation, error)
+	CountPendingNonEnrolledSyncMutations(targetKey string) ([]store.PendingSyncMutationProjectCount, error)
 	AckSyncMutations(targetKey string, lastAckedSeq int64) error
 	AckSyncMutationSeqs(targetKey string, seqs []int64) error
-	SkipAckNonEnrolledMutations(targetKey string) (int64, error)
 	AcquireSyncLease(targetKey, owner string, ttl time.Duration, now time.Time) (bool, error)
 	ReleaseSyncLease(targetKey, owner string) error
 	ApplyPulledMutation(targetKey string, mutation store.SyncMutation) error
 	MarkSyncFailure(targetKey, message string, backoffUntil time.Time) error
+	MarkSyncBlocked(targetKey, reasonCode, message string) error
 	MarkSyncHealthy(targetKey string) error
 	// Phase E: deferred relation retry.
 	ReplayDeferred() (store.ReplayDeferredResult, error)
 	CountDeferredAndDead() (deferred, dead int, err error)
+}
+
+type nonEnrolledPendingError struct {
+	counts []store.PendingSyncMutationProjectCount
+}
+
+func (e *nonEnrolledPendingError) Error() string {
+	return nonEnrolledPendingMessage(e.counts)
 }
 
 // CloudTransport is the subset of remote.MutationTransport methods the manager needs.
@@ -401,14 +411,19 @@ func (m *Manager) cycle(ctx context.Context) {
 
 	// Push, then pull.
 	if err := m.push(ctx); err != nil {
+		var blocked *nonEnrolledPendingError
+		if errors.As(err, &blocked) {
+			m.recordBlocked(err.Error(), constants.ReasonNonEnrolledPendingMutations)
+			return
+		}
 		reasonCode := classifyTransportError(err)
-		m.recordFailureWithReason(fmt.Sprintf("push: %v", err), reasonCode)
+		m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("push: %v", err), err), reasonCode)
 		return
 	}
 
 	if err := m.pull(ctx); err != nil {
 		reasonCode := classifyTransportError(err)
-		m.recordFailureWithReason(fmt.Sprintf("pull: %v", err), reasonCode)
+		m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("pull: %v", err), err), reasonCode)
 		return
 	}
 
@@ -438,6 +453,14 @@ func classifyTransportError(err error) string {
 	return "transport_failed"
 }
 
+func autosyncFailureMessage(targetKey, message string, err error) string {
+	project := syncguidance.ProjectFromError(err)
+	if project == "" {
+		project = syncguidance.ProjectFromTargetKey(targetKey)
+	}
+	return syncguidance.AppendGuidance(message, project, err)
+}
+
 // unwrapTransportStatusError walks the error chain looking for transportStatusError.
 func unwrapTransportStatusError(err error) (transportStatusError, bool) {
 	for err != nil {
@@ -458,16 +481,18 @@ func (m *Manager) push(ctx context.Context) error {
 
 	m.setPhase(PhasePushing)
 
-	// Skip-ack mutations for non-enrolled projects.
-	if _, err := m.store.SkipAckNonEnrolledMutations(m.cfg.TargetKey); err != nil {
-		return fmt.Errorf("skip-ack non-enrolled: %w", err)
-	}
-
 	pending, err := m.store.ListPendingSyncMutations(m.cfg.TargetKey, m.cfg.PushBatchSize)
 	if err != nil {
 		return fmt.Errorf("list pending: %w", err)
 	}
 	if len(pending) == 0 {
+		counts, err := m.store.CountPendingNonEnrolledSyncMutations(m.cfg.TargetKey)
+		if err != nil {
+			return fmt.Errorf("count pending non-enrolled mutations: %w", err)
+		}
+		if len(counts) > 0 {
+			return &nonEnrolledPendingError{counts: counts}
+		}
 		return nil
 	}
 
@@ -609,6 +634,18 @@ func (m *Manager) recordFailureWithReason(msg, reasonCode string) {
 	_ = m.store.MarkSyncFailure(m.cfg.TargetKey, msg, bu)
 }
 
+func (m *Manager) recordBlocked(msg, reasonCode string) {
+	m.mu.Lock()
+	m.status.Phase = PhasePushFailed
+	m.status.LastError = msg
+	m.status.ReasonCode = reasonCode
+	m.status.ReasonMessage = msg
+	m.status.BackoffUntil = nil
+	m.mu.Unlock()
+
+	_ = m.store.MarkSyncBlocked(m.cfg.TargetKey, reasonCode, msg)
+}
+
 func (m *Manager) recordSuccess() {
 	now := time.Now()
 	m.mu.Lock()
@@ -622,6 +659,14 @@ func (m *Manager) recordSuccess() {
 	m.mu.Unlock()
 
 	_ = m.store.MarkSyncHealthy(m.cfg.TargetKey)
+}
+
+func nonEnrolledPendingMessage(counts []store.PendingSyncMutationProjectCount) string {
+	parts := make([]string, 0, len(counts))
+	for _, count := range counts {
+		parts = append(parts, fmt.Sprintf("%s=%d", count.Project, count.Count))
+	}
+	return fmt.Sprintf("pending cloud sync mutations are blocked because project(s) are not enrolled: %s. Run `engram cloud enroll <project>` for each intended project or review enrollment.", strings.Join(parts, ", "))
 }
 
 // computeBackoff returns exponential backoff with ±25% jitter.

@@ -563,6 +563,114 @@ func TestCloudCommandIsolationDoesNotMutateLocalState(t *testing.T) {
 	}
 }
 
+func TestCmdSaveCreatesManualSessionWithCWDDirectory(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	cwd := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get wd: %v", err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	withArgs(t, "engram", "save", "Manual title", "Manual content", "--project", "manual-proj")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSave(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("cmdSave should succeed, panic=%v stderr=%q", recovered, stderr)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	session, err := s.GetSession("manual-save-manual-proj")
+	if err != nil {
+		t.Fatalf("get manual session: %v", err)
+	}
+	wantDir, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatalf("resolve cwd symlinks: %v", err)
+	}
+	gotDir, err := filepath.EvalSymlinks(session.Directory)
+	if err != nil {
+		t.Fatalf("resolve session directory symlinks: %v", err)
+	}
+	if gotDir != wantDir {
+		t.Fatalf("manual session directory = %q, want %q", session.Directory, cwd)
+	}
+}
+
+func TestCloudEnrollAndSyncHelpDoNotMutateLocalState(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		run  func(store.Config)
+	}{
+		{name: "cloud enroll help", args: []string{"engram", "cloud", "enroll", "--help"}, run: cmdCloud},
+		{name: "sync help", args: []string{"engram", "sync", "--help"}, run: cmdSync},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			cfg := testConfig(t)
+			cfg.DataDir = filepath.Join(tmpHome, ".engram")
+
+			withArgs(t, tc.args...)
+			stdout, stderr, recovered := captureOutputAndRecover(t, func() { tc.run(cfg) })
+			if recovered != nil || stderr != "" {
+				t.Fatalf("help should return cleanly, panic=%v stderr=%q stdout=%q", recovered, stderr, stdout)
+			}
+			if !strings.Contains(stdout, "usage:") {
+				t.Fatalf("expected usage output, got %q", stdout)
+			}
+			if _, err := os.Stat(filepath.Join(cfg.DataDir, "engram.db")); err == nil {
+				t.Fatalf("help should not create local database")
+			}
+		})
+	}
+}
+
+func TestUpdateChecksSkipCriticalStartupCommands(t *testing.T) {
+	if shouldCheckForUpdates([]string{"mcp"}) {
+		t.Fatal("mcp startup must not run update check")
+	}
+	if shouldCheckForUpdates([]string{"serve"}) {
+		t.Fatal("serve startup must not run update check")
+	}
+	if shouldCheckForUpdates([]string{"cloud", "serve"}) {
+		t.Fatal("cloud serve startup must not run update check")
+	}
+	if !shouldCheckForUpdates([]string{"version"}) {
+		t.Fatal("normal commands should keep update output")
+	}
+}
+
+func TestMainCloudHelpDoesNotCreateLocalDatabase(t *testing.T) {
+	stubRuntimeHooks(t)
+	dataDir := filepath.Join(t.TempDir(), ".engram")
+	t.Setenv("ENGRAM_DATA_DIR", dataDir)
+	withArgs(t, "engram", "cloud", "--help")
+
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { main() })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("cloud help should return cleanly, panic=%v stderr=%q stdout=%q", recovered, stderr, stdout)
+	}
+	if !strings.Contains(stdout, "usage: engram cloud") {
+		t.Fatalf("expected cloud usage output, got %q", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "engram.db")); err == nil {
+		t.Fatal("cloud help should not create local database")
+	}
+}
+
 func TestCmdCloudStatusDistinguishesAuthAndSyncReadiness(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)
@@ -1225,6 +1333,35 @@ func TestCmdCloudStatusHonorsEnvServerOverride(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Auth status: ready") {
 		t.Fatalf("expected ready auth state with env token, got %q", stdout)
+	}
+}
+
+func TestCmdCloudStatusSurfacesPersistedNonEnrolledPendingDiagnostic(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env-cloud.example.test")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-token")
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := s.MarkSyncBlocked(store.DefaultSyncTargetKey, constants.ReasonNonEnrolledPendingMutations, "pending cloud sync mutations are blocked because project(s) are not enrolled: alpha=2. Run `engram cloud enroll <project>` for each intended project or review enrollment."); err != nil {
+		_ = s.Close()
+		t.Fatalf("mark blocked: %v", err)
+	}
+	_ = s.Close()
+
+	withArgs(t, "engram", "cloud", "status")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("cloud status should succeed, panic=%v stderr=%q", recovered, stderr)
+	}
+	for _, want := range []string{"Sync diagnostic: degraded", "reason_code: non_enrolled_pending_mutations", "engram cloud enroll <project>"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("expected cloud status output to contain %q, got %q", want, stdout)
+		}
 	}
 }
 
@@ -2653,6 +2790,125 @@ func TestMarkCloudSyncFailureClassifiesHTTPStatusCodes(t *testing.T) {
 				t.Fatalf("expected reason_code=%q, got %v", tc.expectCode, state.ReasonCode)
 			}
 		})
+	}
+}
+
+func TestMarkCloudSyncFailureStoresRepairGuidance(t *testing.T) {
+	cfg := testConfig(t)
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	targetKey := cloudTargetKeyForProject("proj-a")
+	syncErr := &remote.HTTPStatusError{
+		Operation:  "push chunk abc123",
+		StatusCode: http.StatusBadRequest,
+		ErrorClass: "repairable",
+		ErrorCode:  "upgrade_repairable_legacy_mutation_payload",
+		Body:       "legacy mutation payload missing required field: directory is required",
+	}
+	markCloudSyncFailure(s, targetKey, syncErr)
+
+	state, err := s.GetSyncState(targetKey)
+	if err != nil {
+		t.Fatalf("get sync state: %v", err)
+	}
+	if state.LastError == nil {
+		t.Fatal("expected stored last_error")
+	}
+	for _, want := range []string{
+		"legacy mutation payload missing required field",
+		"Known repairable cloud sync failure detected.",
+		"engram cloud upgrade doctor --project proj-a",
+		"engram cloud upgrade repair --project proj-a --dry-run",
+		"engram cloud upgrade repair --project proj-a --apply",
+		"engram sync --cloud --project proj-a",
+	} {
+		if !strings.Contains(*state.LastError, want) {
+			t.Fatalf("expected last_error to contain %q, got %q", want, *state.LastError)
+		}
+	}
+	if strings.Contains(*state.LastError, "--auto-repair") {
+		t.Fatalf("guidance must not mention auto-repair, got %q", *state.LastError)
+	}
+	upgradeState, err := s.GetCloudUpgradeState("proj-a")
+	if err != nil {
+		t.Fatalf("get cloud upgrade state: %v", err)
+	}
+	if upgradeState != nil {
+		t.Fatalf("sync failure guidance must not auto-create repair state, got %+v", upgradeState)
+	}
+}
+
+func TestCmdSyncCloudFailurePrintsRepairGuidance(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	oldSyncExport := syncExport
+	t.Cleanup(func() { syncExport = oldSyncExport })
+
+	workDir := t.TempDir()
+	withCwd(t, workDir)
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://cloud.example.test")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	if err := s.EnrollProject("proj-a"); err != nil {
+		_ = s.Close()
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	repairableErr := &remote.HTTPStatusError{
+		Operation:  "push chunk abc123",
+		StatusCode: http.StatusBadRequest,
+		ErrorClass: "repairable",
+		ErrorCode:  "upgrade_repairable_payload_invalid",
+		Body:       "invalid upsert payload: sessions[0].directory is required",
+	}
+	syncExport = func(*engramsync.Syncer, string, string) (*engramsync.SyncResult, error) {
+		return nil, repairableErr
+	}
+
+	withArgs(t, "engram", "sync", "--cloud", "--project", "proj-a")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(cfg) })
+	if code, ok := recovered.(exitCode); !ok || int(code) != 1 {
+		t.Fatalf("expected fatal exit code 1, got %v", recovered)
+	}
+	for _, want := range []string{
+		"invalid upsert payload: sessions[0].directory is required",
+		"Known repairable cloud sync failure detected.",
+		"engram cloud upgrade doctor --project proj-a",
+		"engram cloud upgrade repair --project proj-a --dry-run",
+		"engram cloud upgrade repair --project proj-a --apply",
+		"engram sync --cloud --project proj-a",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("expected stderr to contain %q, got %q", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "--auto-repair") {
+		t.Fatalf("guidance must not mention auto-repair, got %q", stderr)
+	}
+	s, err = store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New after failure: %v", err)
+	}
+	defer s.Close()
+	upgradeState, err := s.GetCloudUpgradeState("proj-a")
+	if err != nil {
+		t.Fatalf("get cloud upgrade state: %v", err)
+	}
+	if upgradeState != nil {
+		t.Fatalf("sync --cloud failure guidance must not auto-create repair state, got %+v", upgradeState)
 	}
 }
 

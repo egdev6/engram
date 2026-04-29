@@ -30,6 +30,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/autosync"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/project"
@@ -505,18 +506,26 @@ func markCloudSyncFailure(s *store.Store, targetKey string, syncErr error) {
 	if syncErr == nil {
 		return
 	}
+	message := cloudSyncFailureMessage(syncguidance.ProjectFromTargetKey(targetKey), syncErr)
 	var statusErr *remote.HTTPStatusError
 	if errors.As(syncErr, &statusErr) {
 		switch {
 		case statusErr.IsAuthFailure():
-			_ = s.MarkSyncAuthRequired(targetKey, syncErr.Error())
+			_ = s.MarkSyncAuthRequired(targetKey, message)
 			return
 		case statusErr.IsPolicyFailure():
-			_ = s.MarkSyncBlocked(targetKey, constants.ReasonPolicyForbidden, syncErr.Error())
+			_ = s.MarkSyncBlocked(targetKey, constants.ReasonPolicyForbidden, message)
 			return
 		}
 	}
-	_ = s.MarkSyncFailure(targetKey, syncErr.Error(), time.Now().UTC().Add(30*time.Second))
+	_ = s.MarkSyncFailure(targetKey, message, time.Now().UTC().Add(30*time.Second))
+}
+
+func cloudSyncFailureMessage(project string, syncErr error) string {
+	if syncErr == nil {
+		return ""
+	}
+	return syncguidance.AppendGuidance(syncErr.Error(), project, syncErr)
 }
 
 func main() {
@@ -525,10 +534,11 @@ func main() {
 		exitFunc(1)
 	}
 
-	// Check for updates on every invocation.
-	if result := checkForUpdates(version); result.Status != versioncheck.StatusUpToDate && result.Message != "" {
-		fmt.Fprintln(os.Stderr, result.Message)
-		fmt.Fprintln(os.Stderr)
+	if shouldCheckForUpdates(os.Args[1:]) {
+		printUpdateCheckResult(checkForUpdates(version))
+	}
+	if handleConfigFreeCommand(os.Args[1:]) {
+		return
 	}
 
 	cfg, cfgErr := store.DefaultConfig()
@@ -594,6 +604,50 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
 		printUsage()
 		exitFunc(1)
+	}
+}
+
+func shouldCheckForUpdates(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	command := strings.ToLower(strings.TrimSpace(args[0]))
+	switch command {
+	case "mcp", "serve":
+		return false
+	case "cloud":
+		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
+	}
+	return true
+}
+
+func handleConfigFreeCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "version", "--version", "-v":
+		fmt.Printf("engram %s\n", version)
+		return true
+	case "help", "--help", "-h":
+		printUsage()
+		return true
+	case "cloud":
+		if len(args) >= 2 {
+			subcommand := strings.ToLower(strings.TrimSpace(args[1]))
+			if subcommand == "--help" || subcommand == "-h" || subcommand == "help" {
+				cmdCloud(store.Config{})
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func printUpdateCheckResult(result versioncheck.CheckResult) {
+	if result.Status != versioncheck.StatusUpToDate && result.Message != "" {
+		fmt.Fprintln(os.Stderr, result.Message)
+		fmt.Fprintln(os.Stderr)
 	}
 }
 
@@ -886,7 +940,13 @@ func cmdSave(cfg store.Config) {
 	if project != "" {
 		sessionID = "manual-save-" + project
 	}
-	s.CreateSession(sessionID, project, "")
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatal(err)
+	}
+	if err := s.CreateSession(sessionID, project, cwd); err != nil {
+		fatal(err)
+	}
 	id, err := storeAddObservation(s, store.AddObservationParams{
 		SessionID: sessionID,
 		Type:      typ,
@@ -1117,6 +1177,9 @@ func cmdSync(cfg store.Config) {
 	projectProvided := false
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
+		case "--help", "-h", "help":
+			printSyncUsage()
+			return
 		case "--import":
 			doImport = true
 		case "--status":
@@ -1216,7 +1279,7 @@ func cmdSync(cfg store.Config) {
 			if !doStatus {
 				markCloudSyncFailure(s, cloudTargetKey, err)
 			}
-			fatal(err)
+			fatal(errors.New(cloudSyncFailureMessage(project, err)))
 		}
 		sy = engramsync.NewCloudWithTransport(s, transport, project)
 	}
@@ -1245,6 +1308,9 @@ func cmdSync(cfg store.Config) {
 		if err != nil {
 			if cloudEnabled {
 				markCloudSyncFailure(s, cloudTargetKey, err)
+			}
+			if cloudEnabled {
+				fatal(errors.New(cloudSyncFailureMessage(project, err)))
 			}
 			fatal(err)
 		}
@@ -1287,6 +1353,7 @@ func cmdSync(cfg store.Config) {
 	if err != nil {
 		if cloudEnabled {
 			markCloudSyncFailure(s, cloudTargetKey, err)
+			fatal(errors.New(cloudSyncFailureMessage(project, err)))
 		}
 		fatal(err)
 	}
@@ -1315,6 +1382,12 @@ func cmdSync(cfg store.Config) {
 	fmt.Println()
 	fmt.Println("Add to git:")
 	fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
+}
+
+func printSyncUsage() {
+	fmt.Println("usage: engram sync [--import | --status] [--all] [--cloud --project PROJECT]")
+	fmt.Println("Local sync exports project-scoped chunks to .engram/ by default.")
+	fmt.Println("Cloud sync requires an explicit --project and never runs from --help.")
 }
 
 // storeAdapter wraps *store.Store to satisfy obsidian.StoreReader.

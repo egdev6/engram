@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1735,6 +1737,132 @@ func TestAdditionalHelperBranches(t *testing.T) {
 	})
 }
 
+func TestClaudeCodePermissionTools(t *testing.T) {
+	tools := claudeCodePermissionTools(map[string]bool{
+		"mem_search":          true,
+		"mem_current_project": true,
+		"mem_stats":           false,
+	})
+
+	want := []string{
+		"mcp__engram__mem_current_project",
+		"mcp__engram__mem_search",
+		"mcp__plugin_engram_engram__mem_current_project",
+		"mcp__plugin_engram_engram__mem_search",
+	}
+	if !reflect.DeepEqual(tools, want) {
+		t.Fatalf("unexpected permissions:\nwant %#v\n got %#v", want, tools)
+	}
+
+	for _, tool := range []string{
+		"mcp__engram__mem_current_project",
+		"mcp__engram__mem_judge",
+		"mcp__plugin_engram_engram__mem_current_project",
+		"mcp__plugin_engram_engram__mem_judge",
+	} {
+		if !slices.Contains(claudeCodeMCPTools, tool) {
+			t.Fatalf("claudeCodeMCPTools missing current agent permission %q", tool)
+		}
+	}
+}
+
+func TestClaudeCodeMemorySkillDoesNotHardcodePluginScopedToolSearch(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "skills", "memory", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read memory skill: %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "select:mcp__plugin_engram_engram__") {
+		t.Fatalf("memory skill must not hardcode plugin-scoped ToolSearch names")
+	}
+	if !strings.Contains(text, "engram setup claude-code") {
+		t.Fatalf("memory skill fallback should direct users to repair Claude Code setup")
+	}
+}
+
+func TestClaudeCodeUserPromptHookUsesCurrentMCPServerID(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
+	if err != nil {
+		t.Fatalf("read user prompt hook: %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "select:mcp__plugin_engram_engram__") {
+		t.Fatalf("user prompt hook must not hardcode plugin-scoped ToolSearch names")
+	}
+	for _, tool := range []string{
+		"mcp__engram__mem_save",
+		"mcp__engram__mem_search",
+		"mcp__engram__mem_context",
+		"mcp__engram__mem_current_project",
+		"mcp__engram__mem_judge",
+	} {
+		if !strings.Contains(text, tool) {
+			t.Fatalf("user prompt hook missing current ToolSearch name %q", tool)
+		}
+	}
+}
+
+func TestClaudeCodeUserPromptHookDefersProjectDetectionUntilNeeded(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
+	if err != nil {
+		t.Fatalf("read user prompt hook: %v", err)
+	}
+	text := string(data)
+
+	sessionParse := strings.Index(text, "SESSION_ID=$(echo \"$INPUT\" | jq -r '.session_id // empty')")
+	sessionKeyBranch := strings.Index(text, "if [ -n \"$SESSION_ID\" ]; then")
+	if sessionParse < 0 || sessionKeyBranch < 0 {
+		t.Fatalf("user prompt hook missing expected session parsing/keying structure")
+	}
+	if preKey := text[sessionParse:sessionKeyBranch]; strings.Contains(preKey, "detect_project") {
+		t.Fatalf("user prompt hook must not detect project before session_id-first keying")
+	}
+
+	fallbackDetect := "PROJECT=$(detect_project \"$CWD\")\n  SAFE_PROJECT="
+	if !strings.Contains(text, fallbackDetect) {
+		t.Fatalf("user prompt hook should detect project only for the no-session_id fallback key")
+	}
+
+	subsequentMarker := strings.Index(text, "# SUBSEQUENT MESSAGES")
+	if subsequentMarker < 0 {
+		t.Fatalf("user prompt hook missing subsequent-message section")
+	}
+	if !strings.Contains(text[subsequentMarker:], "PROJECT=$(detect_project \"$CWD\")") {
+		t.Fatalf("user prompt hook should detect project for subsequent nudge logic after first-message handling")
+	}
+}
+
+func TestClaudeCodeUserPromptSubmitHookTimeout(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read Claude Code hooks config: %v", err)
+	}
+
+	var cfg struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse Claude Code hooks config: %v", err)
+	}
+
+	entries := cfg.Hooks["UserPromptSubmit"]
+	if len(entries) != 1 || len(entries[0].Hooks) != 1 {
+		t.Fatalf("expected one UserPromptSubmit command hook, got %#v", entries)
+	}
+	hook := entries[0].Hooks[0]
+	if hook.Command != "${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.sh" {
+		t.Fatalf("unexpected UserPromptSubmit command %q", hook.Command)
+	}
+	if hook.Timeout != 5 {
+		t.Fatalf("UserPromptSubmit timeout = %d, want 5", hook.Timeout)
+	}
+}
+
 func TestAddClaudeCodeAllowlist(t *testing.T) {
 	t.Run("creates file from scratch", func(t *testing.T) {
 		resetSetupSeams(t)
@@ -1869,7 +1997,7 @@ func TestAddClaudeCodeAllowlist(t *testing.T) {
 			t.Fatalf("mkdir: %v", err)
 		}
 
-		// Include 3 of 11 tools
+		// Include 3 tools and verify only the missing permissions are appended.
 		partial := []string{
 			claudeCodeMCPTools[0],
 			claudeCodeMCPTools[3],

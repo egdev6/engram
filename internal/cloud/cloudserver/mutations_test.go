@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 )
 
 // ─── Fakes for mutation tests ─────────────────────────────────────────────────
@@ -48,6 +50,125 @@ func (s *fakeMutationStore) IsProjectSyncEnabled(project string) (bool, error) {
 		return enabled, nil
 	}
 	return true, nil // default: enabled
+}
+
+func (s *fakeMutationStore) WriteChunk(ctx context.Context, project string, chunkID, createdBy, clientCreatedAt string, payload []byte) error {
+	if _, exists := s.chunks[chunkID]; exists {
+		return s.fakeStore.WriteChunk(ctx, project, chunkID, createdBy, clientCreatedAt, payload)
+	}
+	if err := s.fakeStore.WriteChunk(ctx, project, chunkID, createdBy, clientCreatedAt, payload); err != nil {
+		return err
+	}
+	var chunk engramsync.ChunkData
+	if err := json.Unmarshal(payload, &chunk); err != nil {
+		return err
+	}
+	batch := make([]MutationEntry, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts))
+	for _, session := range chunk.Sessions {
+		body, _ := json.Marshal(session)
+		batch = append(batch, MutationEntry{Project: project, Entity: store.SyncEntitySession, EntityKey: strings.TrimSpace(session.ID), Op: store.SyncOpUpsert, Payload: body})
+	}
+	for _, observation := range chunk.Observations {
+		body, _ := json.Marshal(observation)
+		batch = append(batch, MutationEntry{Project: project, Entity: store.SyncEntityObservation, EntityKey: strings.TrimSpace(observation.SyncID), Op: store.SyncOpUpsert, Payload: body})
+	}
+	for _, prompt := range chunk.Prompts {
+		body, _ := json.Marshal(prompt)
+		batch = append(batch, MutationEntry{Project: project, Entity: store.SyncEntityPrompt, EntityKey: strings.TrimSpace(prompt.SyncID), Op: store.SyncOpUpsert, Payload: body})
+	}
+	_, err := s.InsertMutationBatch(ctx, batch)
+	return err
+}
+
+func TestChunkPushMaterializesMutationsForAutosyncPull(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	body := strings.NewReader(`{
+		"project":"proj-a",
+		"created_by":"tester",
+		"data":{
+			"sessions":[{"id":"s-1","directory":"/tmp/s-1","started_at":"2026-04-29T10:00:00Z"}],
+			"observations":[{"sync_id":"obs-1","session_id":"s-1","type":"decision","title":"Decision","content":"Content","scope":"project","created_at":"2026-04-29T10:01:00Z","updated_at":"2026-04-29T10:01:00Z"}],
+			"prompts":[{"sync_id":"prompt-1","session_id":"s-1","content":"Prompt","created_at":"2026-04-29T10:02:00Z"}]
+		}
+	}`)
+
+	pushRec := httptest.NewRecorder()
+	pushReq := httptest.NewRequest(http.MethodPost, "/sync/push", body)
+	pushReq.Header.Set("Authorization", "Bearer secret")
+	pushReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(pushRec, pushReq)
+	if pushRec.Code != http.StatusOK {
+		t.Fatalf("expected chunk push 200, got %d body=%q", pushRec.Code, pushRec.Body.String())
+	}
+	if len(ms.chunks) != 1 {
+		t.Fatalf("expected one stored chunk, got %d", len(ms.chunks))
+	}
+	if len(ms.mutations) != 3 {
+		t.Fatalf("expected 3 materialized mutations, got %d: %+v", len(ms.mutations), ms.mutations)
+	}
+	if ms.mutations[0].Entity != store.SyncEntitySession || ms.mutations[1].Entity != store.SyncEntityObservation || ms.mutations[2].Entity != store.SyncEntityPrompt {
+		t.Fatalf("expected session/observation/prompt order, got %+v", ms.mutations)
+	}
+	if ms.mutations[1].Project != "proj-a" || ms.mutations[1].EntityKey != "obs-1" || ms.mutations[1].Op != store.SyncOpUpsert {
+		t.Fatalf("unexpected materialized observation mutation: %+v", ms.mutations[1])
+	}
+
+	pullRec := httptest.NewRecorder()
+	pullReq := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull?since_seq=0&limit=100", nil)
+	pullReq.Header.Set("Authorization", "Bearer secret")
+	srv.Handler().ServeHTTP(pullRec, pullReq)
+	if pullRec.Code != http.StatusOK {
+		t.Fatalf("expected mutation pull 200, got %d body=%q", pullRec.Code, pullRec.Body.String())
+	}
+	var pulled struct {
+		Mutations []StoredMutation `json:"mutations"`
+	}
+	if err := json.NewDecoder(pullRec.Body).Decode(&pulled); err != nil {
+		t.Fatalf("decode pull response: %v", err)
+	}
+	if len(pulled.Mutations) != 3 || pulled.Mutations[1].Entity != store.SyncEntityObservation || pulled.Mutations[1].EntityKey != "obs-1" {
+		t.Fatalf("expected pulled observation mutation after chunk push, got %+v", pulled.Mutations)
+	}
+}
+
+func TestChunkPushReplayDoesNotDuplicateMaterializedMutations(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	body := `{"project":"proj-a","created_by":"tester","data":{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}],"observations":[{"sync_id":"obs-1","session_id":"s-1","type":"decision","title":"Decision","content":"Content","scope":"project"}]}}`
+
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		req.Header.Set("Content-Type", "application/json")
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("push %d expected 200, got %d body=%q", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	if len(ms.chunks) != 1 {
+		t.Fatalf("expected one stored chunk after replay, got %d", len(ms.chunks))
+	}
+	if len(ms.mutations) != 2 {
+		t.Fatalf("expected replay to keep 2 materialized mutations, got %d: %+v", len(ms.mutations), ms.mutations)
+	}
+}
+
+func TestMalformedChunkRejectsBeforeMaterialization(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(`{"project":"proj-a","created_by":"tester","data":{"observations":[{"sync_id":"obs-1","session_id":"missing","type":"decision","title":"Decision","content":"Content","scope":"project"}]}}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected malformed chunk 400, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.chunks) != 0 || len(ms.mutations) != 0 {
+		t.Fatalf("expected no chunk or mutation after malformed push, chunks=%d mutations=%d", len(ms.chunks), len(ms.mutations))
+	}
 }
 
 func (s *fakeMutationStore) InsertMutationBatch(ctx context.Context, batch []MutationEntry) ([]int64, error) {

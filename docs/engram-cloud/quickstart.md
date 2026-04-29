@@ -90,6 +90,92 @@ Dokploy guidance:
 4. Expose container port `18080`.
 5. Avoid build-from-source mode unless you are actively developing Engram itself.
 
+### VPS / self-hosted Compose
+
+For a plain VPS, put secrets in a `.env` file next to your compose file instead of
+hardcoding them into YAML.
+
+Directory layout:
+
+```text
+/opt/engram/
+  docker-compose.yml
+  .env
+```
+
+Example `.env`:
+
+```dotenv
+POSTGRES_USER=engram
+POSTGRES_PASSWORD=replace-with-strong-postgres-password
+POSTGRES_DB=engram_cloud
+
+ENGRAM_DATABASE_URL=postgres://engram:replace-with-strong-postgres-password@postgres:5432/engram_cloud?sslmode=disable
+ENGRAM_CLOUD_TOKEN=replace-with-long-random-bearer-token
+ENGRAM_CLOUD_ADMIN=replace-with-separate-admin-token
+ENGRAM_JWT_SECRET=replace-with-32+-byte-random-secret
+ENGRAM_CLOUD_ALLOWED_PROJECTS=engram,gentle-ai
+ENGRAM_CLOUD_HOST=0.0.0.0
+ENGRAM_PORT=18080
+```
+
+Notes:
+- Keep `.env` on the server only. Do not commit it.
+- `ENGRAM_CLOUD_TOKEN` is the bearer token clients use for authenticated sync.
+- `ENGRAM_CLOUD_ADMIN` is the dashboard admin token. Use a different secret from `ENGRAM_CLOUD_TOKEN`.
+- `ENGRAM_JWT_SECRET` must be an explicit, non-default strong secret in authenticated mode.
+- `ENGRAM_CLOUD_ALLOWED_PROJECTS` is required server-side and should be a comma-separated allowlist.
+
+Reference compose:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - engram-cloud-pg:/var/lib/postgresql/data
+
+  cloud:
+    image: ghcr.io/gentleman-programming/engram:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    ports:
+      - "18080:18080"
+```
+
+Start or restart after editing `.env`:
+
+```bash
+docker compose up -d
+docker compose restart cloud
+```
+
+If you upgrade the `engram` image tag, redeploy or restart the container so the
+running server picks up the new binary.
+
+### Client-side token setup
+
+On the machine that runs the Engram CLI, set the client token in the shell before
+cloud sync:
+
+```bash
+engram cloud config --server https://your-host:18080
+export ENGRAM_CLOUD_TOKEN=replace-with-long-random-bearer-token
+engram cloud enroll my-project
+engram sync --cloud --project my-project
+```
+
 > `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` is for local/dev smoke only. Never use it in production.
 
 ---
@@ -104,6 +190,8 @@ Dokploy guidance:
 | `policy_forbidden` | Project blocked by cloud policy |
 | `paused` | Project sync paused in cloud control plane |
 | `transport_failed` | Cloud transport/network operation failed |
+
+For concrete recovery steps, see [Engram Cloud Troubleshooting](./troubleshooting.md).
 
 ---
 
@@ -143,4 +231,5 @@ Rules that matter:
 
 - Deep runtime/env reference: [DOCS.md — Cloud CLI](../../DOCS.md#cloud-cli-opt-in)
 - Background sync mode: [DOCS.md — Cloud Autosync](../../DOCS.md#cloud-autosync)
+- Cloud sync failures: [Troubleshooting](./troubleshooting.md)
 - Branding assets and usage: [Branding](./branding.md)

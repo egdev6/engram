@@ -125,6 +125,24 @@ engram sync --cloud --project smoke-project
 ```
 
 Cloud mode is always project-scoped (`--project` is required; `engram sync --cloud --all` is intentionally blocked).
+Known repairable cloud sync/upsert/canonicalization failures keep the original error visible and recommend the explicit `doctor`/`repair` flow below; Engram never auto-applies repair from sync or autosync.
+For blocked cloud sync, `transport_failed`, or legacy session directory repair, see [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md).
+If cloud sync stays blocked after `doctor`/`repair`, download the rescue helper and run the recommended exported-row repair:
+
+```bash
+tools/repair-missing-session-directory.sh --apply --interactive --fix-exported <project>
+engram sync --cloud --project <project>
+```
+
+`--fix-exported` repairs local exported `sessions[].directory` and `observations[]` required fields that can still break the final push after `doctor` reports ready. For sequential legacy `sync_mutations` blockers, use `tools/repair-missing-session-directory.sh --apply --interactive --all <project>`.
+
+**After upgrading `engram` while an MCP client is already running:**
+
+```bash
+engram setup claude-code
+```
+
+Then restart Claude Code so it reloads the Engram MCP subprocess and refreshed hook/config files. Updating the `engram` binary on disk does not replace an already-running stdio MCP process.
 
 **Upgrade flow for existing local databases** (diagnose → repair → bootstrap → status):
 
@@ -271,7 +289,7 @@ Your production engram is fully untouched throughout.
 |---------|-------------|
 | `engram setup [agent]` | Install agent integration |
 | `engram serve [port]` | Start HTTP API (default: 7437) |
-| `engram mcp` | Start MCP server (stdio) |
+| `engram mcp [--tools=PROFILE]` | Start MCP server (stdio transport) |
 | `engram tui` | Launch terminal UI |
 | `engram search <query>` | Search memories |
 | `engram save <title> <msg>` | Save a memory |

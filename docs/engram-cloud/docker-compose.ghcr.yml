@@ -2,10 +2,12 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: engram
-      POSTGRES_PASSWORD: change-me
-      POSTGRES_DB: engram_cloud
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - engram-cloud-pg:/var/lib/postgresql/data
     healthcheck:
@@ -20,14 +22,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    environment:
-      ENGRAM_DATABASE_URL: postgres://engram:change-me@postgres:5432/engram_cloud?sslmode=disable
-      ENGRAM_CLOUD_TOKEN: replace-with-random-token
-      ENGRAM_CLOUD_ADMIN: admin
-      ENGRAM_JWT_SECRET: replace-with-32+-byte-random-secret
-      ENGRAM_CLOUD_ALLOWED_PROJECTS: my-project
-      ENGRAM_CLOUD_HOST: 0.0.0.0
-      ENGRAM_PORT: "18080"
+    env_file:
+      - .env
     ports:
       - "18080:18080"
 
