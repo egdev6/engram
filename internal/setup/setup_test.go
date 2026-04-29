@@ -1802,6 +1802,67 @@ func TestClaudeCodeUserPromptHookUsesCurrentMCPServerID(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeUserPromptHookDefersProjectDetectionUntilNeeded(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
+	if err != nil {
+		t.Fatalf("read user prompt hook: %v", err)
+	}
+	text := string(data)
+
+	sessionParse := strings.Index(text, "SESSION_ID=$(echo \"$INPUT\" | jq -r '.session_id // empty')")
+	sessionKeyBranch := strings.Index(text, "if [ -n \"$SESSION_ID\" ]; then")
+	if sessionParse < 0 || sessionKeyBranch < 0 {
+		t.Fatalf("user prompt hook missing expected session parsing/keying structure")
+	}
+	if preKey := text[sessionParse:sessionKeyBranch]; strings.Contains(preKey, "detect_project") {
+		t.Fatalf("user prompt hook must not detect project before session_id-first keying")
+	}
+
+	fallbackDetect := "PROJECT=$(detect_project \"$CWD\")\n  SAFE_PROJECT="
+	if !strings.Contains(text, fallbackDetect) {
+		t.Fatalf("user prompt hook should detect project only for the no-session_id fallback key")
+	}
+
+	subsequentMarker := strings.Index(text, "# SUBSEQUENT MESSAGES")
+	if subsequentMarker < 0 {
+		t.Fatalf("user prompt hook missing subsequent-message section")
+	}
+	if !strings.Contains(text[subsequentMarker:], "PROJECT=$(detect_project \"$CWD\")") {
+		t.Fatalf("user prompt hook should detect project for subsequent nudge logic after first-message handling")
+	}
+}
+
+func TestClaudeCodeUserPromptSubmitHookTimeout(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read Claude Code hooks config: %v", err)
+	}
+
+	var cfg struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse Claude Code hooks config: %v", err)
+	}
+
+	entries := cfg.Hooks["UserPromptSubmit"]
+	if len(entries) != 1 || len(entries[0].Hooks) != 1 {
+		t.Fatalf("expected one UserPromptSubmit command hook, got %#v", entries)
+	}
+	hook := entries[0].Hooks[0]
+	if hook.Command != "${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.sh" {
+		t.Fatalf("unexpected UserPromptSubmit command %q", hook.Command)
+	}
+	if hook.Timeout != 5 {
+		t.Fatalf("UserPromptSubmit timeout = %d, want 5", hook.Timeout)
+	}
+}
+
 func TestAddClaudeCodeAllowlist(t *testing.T) {
 	t.Run("creates file from scratch", func(t *testing.T) {
 		resetSetupSeams(t)

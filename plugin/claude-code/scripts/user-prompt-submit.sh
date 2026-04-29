@@ -21,7 +21,6 @@ source "${SCRIPT_DIR}/_helpers.sh"
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-PROJECT=$(detect_project "$CWD")
 
 parse_epoch() {
   TS="$1"
@@ -74,7 +73,8 @@ OUTPUT="{}"
 if [ -n "$SESSION_ID" ]; then
   SESSION_KEY="engram-claude-${SESSION_ID}-tools-loaded"
 else
-  # No session ID available — key on project to avoid repeated injections
+  # No session ID available — only then detect project for the fallback state key.
+  PROJECT=$(detect_project "$CWD")
   SAFE_PROJECT=$(printf '%s' "${PROJECT:-unknown}" | tr -cs 'a-zA-Z0-9_-' '_')
   SESSION_KEY="engram-claude-${SAFE_PROJECT}-$$-tools-loaded"
 fi
@@ -98,6 +98,11 @@ fi
 # ──────────────────────────────────────────────────────────────────────────────
 # SUBSEQUENT MESSAGES — existing save-nudge logic
 # ──────────────────────────────────────────────────────────────────────────────
+
+# Detect project only after the first-message path has had a chance to return.
+if [ -z "${PROJECT:-}" ]; then
+  PROJECT=$(detect_project "$CWD")
+fi
 
 # Bail early if we can't determine the project
 if [ -z "$PROJECT" ]; then
