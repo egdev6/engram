@@ -99,6 +99,8 @@ plugin/claude-code/
 ├── scripts/
 │   ├── session-start.sh           # Ensures server, creates session, imports chunks, injects context
 │   ├── post-compaction.sh         # Injects previous context + recovery instructions
+│   ├── user-prompt-submit.sh      # Loads MCP tools on first prompt; Windows Git Bash safe mode
+│   ├── user-prompt-submit.ps1     # Optional Windows-native fallback for locked-down endpoints
 │   ├── subagent-stop.sh           # Passive capture trigger on subagent completion
 │   └── session-stop.sh            # Logs end-of-session event
 └── skills/memory/SKILL.md         # Memory Protocol (when to save, search, close, recover)
@@ -116,6 +118,37 @@ plugin/claude-code/
 1. Injects the previous session context + compacted summary
 2. Tells the agent: "FIRST ACTION REQUIRED — call `mem_session_summary` with this content before doing anything else"
 3. This ensures no work is lost when context is compressed
+
+**On user prompt submit**:
+1. The first prompt injects a ToolSearch instruction so Claude Code loads Engram MCP tools before responding.
+2. Later prompts may inject a save reminder if the local Engram API is fast and available.
+3. On Windows Git Bash/MSYS2, the hook uses a bash-builtin-only safe path to avoid fork-heavy helpers (`jq`, `git`, `curl`, `date`). In that mode first-prompt ToolSearch still works, but later save reminders degrade to `{}` so prompt submission stays fast.
+
+If Git Bash itself is blocked by enterprise security tooling, `scripts/user-prompt-submit.ps1` is provided as a native PowerShell fallback for manual hook testing or local override.
+
+PowerShell local override/testing example for locked-down Windows endpoints:
+
+```powershell
+# Test the native fallback directly. First run emits ToolSearch; second run emits {}.
+'{"session_id":"edr/test:1"}' | pwsh -NoProfile -ExecutionPolicy Bypass -File "C:\path\to\engram\plugin\claude-code\scripts\user-prompt-submit.ps1"
+
+# Local Claude Code override in .claude/settings.json or user settings:
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"C:\\path\\to\\engram\\plugin\\claude-code\\scripts\\user-prompt-submit.ps1\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}
+```
 
 **Memory Protocol skill** (always available):
 - Strict rules for **when to save** (mandatory after bugfixes, decisions, discoveries)
