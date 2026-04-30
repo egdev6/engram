@@ -31,6 +31,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
 	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/project"
@@ -94,6 +95,14 @@ var (
 	storeStats         = func(s *store.Store) (*store.Stats, error) { return s.Stats() }
 	storeExport        = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
 	jsonMarshalIndent  = json.MarshalIndent
+	runDiagnostics     = func(ctx context.Context, s *store.Store, project, check string) (diagnostic.Report, error) {
+		runner := diagnostic.NewRunner()
+		scope := diagnostic.Scope{Store: s, Project: project, Now: time.Now()}
+		if strings.TrimSpace(check) != "" {
+			return runner.RunOne(ctx, scope, check)
+		}
+		return runner.RunAll(ctx, scope)
+	}
 
 	syncStatus = func(sy *engramsync.Syncer) (localChunks int, remoteChunks int, pendingImport int, err error) {
 		return sy.Status()
@@ -621,6 +630,8 @@ func main() {
 		cmdTimeline(cfg)
 	case "conflicts":
 		cmdConflicts(cfg)
+	case "doctor":
+		cmdDoctor(cfg)
 	case "context":
 		cmdContext(cfg)
 	case "stats":
@@ -2243,7 +2254,8 @@ Commands:
                        show     <relation_id>
                        stats    --project P
                        scan     --project P  [--dry-run]  [--apply]  [--max-insert N]
-                       deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
+                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
+  doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
   context [project]  Show recent context from previous sessions
   stats              Show memory system statistics
   export [file]      Export all memories to JSON (default: engram-export.json)

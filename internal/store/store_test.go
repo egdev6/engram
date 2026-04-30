@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -6776,6 +6777,71 @@ func TestProjectExists_KnownViaEnrollmentOnly(t *testing.T) {
 	}
 	if !exists {
 		t.Error("enrolled-only-project must be found via sync_enrolled_projects UNION ALL branch")
+	}
+}
+
+// ─── Doctor diagnostic helpers ───────────────────────────────────────────────
+
+func TestListDiagnosticSessionsScopesByProject(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := s.CreateSession("manual-save-other", "other", "/work/other"); err != nil {
+		t.Fatalf("CreateSession other: %v", err)
+	}
+	sessions, err := s.ListDiagnosticSessions("engram")
+	if err != nil {
+		t.Fatalf("ListDiagnosticSessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "manual-save-engram" || sessions[0].Name != "manual-save-engram" {
+		t.Fatalf("sessions=%+v", sessions)
+	}
+}
+
+func TestListPendingProjectMutationsAndPayloadValidation(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntityObservation, "obs-1", SyncOpUpsert, `{"sync_id":"obs-1"}`, SyncSourceLocal, "engram"); err != nil {
+		t.Fatalf("insert pending mutation: %v", err)
+	}
+	mutations, err := s.ListPendingProjectMutations("engram")
+	if err != nil {
+		t.Fatalf("ListPendingProjectMutations: %v", err)
+	}
+	if len(mutations) != 1 {
+		t.Fatalf("mutations=%+v", mutations)
+	}
+	validation := ValidateSyncMutationPayload(mutations[0].Entity, mutations[0].Op, mutations[0].Payload, mutations[0].EntityKey)
+	if validation.ReasonCode != "sync_mutation_payload_missing_required_fields" {
+		t.Fatalf("validation=%+v", validation)
+	}
+	if strings.Join(validation.MissingFields, ",") != "session_id,type,title,content,scope" {
+		t.Fatalf("missing fields=%v", validation.MissingFields)
+	}
+}
+
+func TestReadSQLiteLockSnapshotDoesNotMutateApplicationRows(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	var before int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&before); err != nil {
+		t.Fatalf("count before: %v", err)
+	}
+	snapshot, err := s.ReadSQLiteLockSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ReadSQLiteLockSnapshot: %v", err)
+	}
+	var after int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&after); err != nil {
+		t.Fatalf("count after: %v", err)
+	}
+	if before != after {
+		t.Fatalf("session count changed: before=%d after=%d", before, after)
+	}
+	if snapshot.JournalMode == "" || snapshot.BusyTimeoutMS <= 0 {
+		t.Fatalf("snapshot=%+v", snapshot)
 	}
 }
 

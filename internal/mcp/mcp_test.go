@@ -964,6 +964,7 @@ func TestResolveToolsAgentProfile(t *testing.T) {
 		"mem_current_project", // added REQ-313: discovery tool recommended first call
 		"mem_judge",           // REQ-003: conflict verdict tool (Phase D)
 		"mem_compare",         // REQ-011: persist agent-judged semantic verdict (Phase G)
+		"mem_doctor",          // read-only operational diagnostics
 	}
 	for _, tool := range expectedTools {
 		if !result[tool] {
@@ -1008,13 +1009,13 @@ func TestResolveToolsCombinedProfiles(t *testing.T) {
 		t.Fatal("expected non-nil allowlist for combined profiles")
 	}
 
-	// Should have all 18 tools (17 prior + mem_compare added in Phase G)
+	// Should have all 19 tools (mem_doctor added for operational diagnostics)
 	allTools := []string{
 		"mem_save", "mem_search", "mem_context", "mem_session_summary",
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update", "mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects",
-		"mem_current_project", "mem_judge", "mem_compare",
+		"mem_current_project", "mem_judge", "mem_compare", "mem_doctor",
 	}
 	for _, tool := range allTools {
 		if !result[tool] {
@@ -1600,7 +1601,7 @@ func TestNewServerWithToolsNilRegistersAll(t *testing.T) {
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update", "mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects",
-		"mem_current_project", "mem_judge", "mem_compare",
+		"mem_current_project", "mem_judge", "mem_compare", "mem_doctor",
 	}
 
 	for _, name := range allTools {
@@ -1632,6 +1633,72 @@ func TestNewServerWithToolsIndividualSelection(t *testing.T) {
 	}
 }
 
+func TestMemDoctorRegisteredAndReturnsEnvelope(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	srv := NewServerWithTools(s, ResolveTools("agent"))
+	if srv.ListTools()["mem_doctor"] == nil {
+		t.Fatal("expected mem_doctor in agent profile")
+	}
+	res, err := handleDoctor(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram", "check": "manual_session_name_project_mismatch"}}})
+	if err != nil {
+		t.Fatalf("handleDoctor: %v", err)
+	}
+	envelope := callResultJSON(t, res)
+	if envelope["status"] != "ok" || envelope["project"] != "engram" {
+		t.Fatalf("envelope=%v", envelope)
+	}
+	checks := envelope["checks"].([]any)
+	if len(checks) != 1 || checks[0].(map[string]any)["check_id"] != "manual_session_name_project_mismatch" {
+		t.Fatalf("checks=%v", checks)
+	}
+}
+
+func TestMemDoctorOmittedProjectUsesAutoDetectedScope(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+	detected, err := resolveWriteProject()
+	if err != nil {
+		t.Fatalf("resolveWriteProject: %v", err)
+	}
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("manual-save-"+detected.Project, detected.Project, dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	res, err := handleDoctor(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"check": "manual_session_name_project_mismatch"}}})
+	if err != nil {
+		t.Fatalf("handleDoctor: %v", err)
+	}
+	envelope := callResultJSON(t, res)
+	if envelope["project"] != detected.Project {
+		t.Fatalf("expected auto-detected project %q, got envelope=%v", detected.Project, envelope)
+	}
+	if envelope["status"] != "ok" {
+		t.Fatalf("expected ok diagnostics, got envelope=%v", envelope)
+	}
+}
+
+func TestMemDoctorUnknownProjectReturnsStructuredError(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	res, err := handleDoctor(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "missing"}}})
+	if err != nil {
+		t.Fatalf("handleDoctor: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected IsError for unknown project")
+	}
+	envelope := callResultJSON(t, res)
+	if envelope["error_code"] != "unknown_project" {
+		t.Fatalf("envelope=%v", envelope)
+	}
+}
+
 func TestNewServerBackwardsCompatible(t *testing.T) {
 	s := newMCPTestStore(t)
 
@@ -1639,14 +1706,14 @@ func TestNewServerBackwardsCompatible(t *testing.T) {
 	srv := NewServer(s)
 	tools := srv.ListTools()
 
-	// 14 agent + 4 admin = 18 total (mem_compare added in Phase G)
-	if len(tools) != 18 {
-		t.Errorf("NewServer should register all 18 tools, got %d", len(tools))
+	// 15 agent + 4 admin = 19 total (mem_doctor added for diagnostics)
+	if len(tools) != 19 {
+		t.Errorf("NewServer should register all 19 tools, got %d", len(tools))
 	}
 }
 
 func TestProfileConsistency(t *testing.T) {
-	// Verify that agent + admin = all 16 tools
+	// Verify that agent + admin = all 19 tools
 	combined := make(map[string]bool)
 	for tool := range ProfileAgent {
 		combined[tool] = true
@@ -1655,9 +1722,9 @@ func TestProfileConsistency(t *testing.T) {
 		combined[tool] = true
 	}
 
-	// 14 agent + 4 admin = 18 total (mem_compare added in Phase G)
-	if len(combined) != 18 {
-		t.Errorf("agent + admin should cover all 18 tools, got %d", len(combined))
+	// 15 agent + 4 admin = 19 total (mem_doctor added for diagnostics)
+	if len(combined) != 19 {
+		t.Errorf("agent + admin should cover all 19 tools, got %d", len(combined))
 	}
 
 	// Verify no overlap between profiles
@@ -1982,9 +2049,9 @@ func TestNewServerWithConfig(t *testing.T) {
 		t.Fatal("expected MCP server instance")
 	}
 	tools := srv.ListTools()
-	// Should have all 18 tools (14 agent + 4 admin; mem_compare added in Phase G)
-	if len(tools) != 18 {
-		t.Errorf("NewServerWithConfig should register all 18 tools, got %d", len(tools))
+	// Should have all 19 tools (15 agent + 4 admin; mem_doctor added)
+	if len(tools) != 19 {
+		t.Errorf("NewServerWithConfig should register all 19 tools, got %d", len(tools))
 	}
 }
 

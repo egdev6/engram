@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -97,6 +98,7 @@ var ProfileAgent = map[string]bool{
 	"mem_current_project":   true, // detect current project — recommended first call for agents (REQ-313)
 	"mem_judge":             true, // record verdict on a pending memory conflict (REQ-003, Phase D)
 	"mem_compare":           true, // persist an agent-judged semantic verdict via JudgeBySemantic (REQ-011, Phase G)
+	"mem_doctor":            true, // read-only operational diagnostics for agents
 }
 
 // ProfileAdmin contains tools for TUI, dashboards, and manual curation
@@ -689,6 +691,24 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				mcp.WithOpenWorldHintAnnotation(false),
 			),
 			handleCurrentProject(s),
+		)
+	}
+
+	// ─── mem_doctor (profile: agent, deferred) ──────────────────────────
+	if shouldRegister("mem_doctor", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_doctor",
+				mcp.WithDescription("Run read-only operational diagnostics. Returns the same structured envelope as `engram doctor --json`."),
+				mcp.WithDeferLoading(true),
+				mcp.WithTitleAnnotation("Run Engram Doctor"),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+				mcp.WithIdempotentHintAnnotation(true),
+				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("project", mcp.Description("Project to diagnose (omit for auto-detect)")),
+				mcp.WithString("check", mcp.Description("Optional diagnostic check code to run")),
+			),
+			handleDoctor(s),
 		)
 	}
 
@@ -1335,6 +1355,47 @@ func handleStats(s *store.Store) server.ToolHandlerFunc {
 			stats.TotalSessions, stats.TotalObservations, stats.TotalPrompts, projects)
 
 		return respondWithProject(detRes, result, nil), nil
+	}
+}
+
+func DoctorToolHandler(s *store.Store) server.ToolHandlerFunc {
+	return handleDoctor(s)
+}
+
+func handleDoctor(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		projectOverride, _ := req.GetArguments()["project"].(string)
+		check, _ := req.GetArguments()["check"].(string)
+		detRes, err := resolveReadProject(s, projectOverride)
+		if err != nil {
+			var upe *unknownProjectError
+			if errors.As(err, &upe) {
+				return errorWithMeta("unknown_project", fmt.Sprintf("Project %q not found in store", upe.Name), upe.AvailableProjects), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
+		}
+		project := detRes.Project
+		project, _ = store.NormalizeProject(project)
+		runner := diagnostic.NewRunner()
+		scope := diagnostic.Scope{Store: s, Project: project, Now: time.Now()}
+		var report diagnostic.Report
+		if strings.TrimSpace(check) != "" {
+			report, err = runner.RunOne(ctx, scope, check)
+		} else {
+			report, err = runner.RunAll(ctx, scope)
+		}
+		if err != nil {
+			report = diagnostic.ErrorReport(project, err)
+		}
+		out, marshalErr := jsonMarshal(report)
+		if marshalErr != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Doctor JSON error: %s", marshalErr)), nil
+		}
+		result := mcp.NewToolResultText(string(out))
+		if report.Status == diagnostic.StatusError {
+			result.IsError = true
+		}
+		return result, nil
 	}
 }
 
