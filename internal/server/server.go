@@ -175,6 +175,7 @@ func (s *Server) routes() {
 
 	// Project migration
 	s.mux.HandleFunc("POST /projects/migrate", s.handleMigrateProject)
+	s.mux.HandleFunc("DELETE /projects/{project}", s.handleDeleteProject)
 
 	// Sync status (degraded-state visibility for autosync)
 	s.mux.HandleFunc("GET /sync/status", s.handleSyncStatus)
@@ -687,6 +688,38 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	project := strings.TrimSpace(r.PathValue("project"))
+	if project == "" {
+		jsonError(w, http.StatusBadRequest, "project is required")
+		return
+	}
+
+	result, err := s.store.DeleteProject(project)
+	if err != nil {
+		if strings.Contains(err.Error(), "must not be empty") {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"status":                    "deleted",
+		"project":                   result.Project,
+		"deleted":                   result.Deleted,
+		"observations_deleted":      result.ObservationsDeleted,
+		"prompts_deleted":           result.PromptsDeleted,
+		"sessions_deleted":          result.SessionsDeleted,
+		"sync_mutations_deleted":    result.SyncMutationsDeleted,
+		"sync_deferred_deleted":     result.SyncDeferredDeleted,
+		"prompt_tombstones_deleted": result.PromptTombstonesDeleted,
+		"enrollment_deleted":        result.EnrollmentDeleted,
+		"upgrade_state_deleted":     result.UpgradeStateDeleted,
+	})
+}
+
 // ─── Conflicts ───────────────────────────────────────────────────────────────
 
 const (
@@ -814,7 +847,8 @@ func (s *Server) handleListDeferred(w http.ResponseWriter, r *http.Request) {
 
 // handleScanConflicts serves POST /conflicts/scan
 // Body: {"project":"X","since":"...","apply":bool,"max_insert":int,
-//        "semantic":bool,"concurrency":int,"timeout_per_call_seconds":int,"max_semantic":int}
+//
+//	"semantic":bool,"concurrency":int,"timeout_per_call_seconds":int,"max_semantic":int}
 func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Project   string `json:"project"`
